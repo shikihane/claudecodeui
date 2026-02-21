@@ -64,8 +64,19 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
       }
     },
     result: {
-      hideOnSuccess: true,
-      type: 'special'
+      type: 'collapsible',
+      defaultOpen: false,
+      title: (result: any) => {
+        const content = String(result?.content || '');
+        const lines = content.split('\n').filter((l: string) => l.trim());
+        if (lines.length === 0) return 'No output';
+        return `Output (${lines.length} line${lines.length === 1 ? '' : 's'})`;
+      },
+      contentType: 'text',
+      getContentProps: (result: any) => ({
+        content: String(result?.content || ''),
+        format: 'code'
+      })
     }
   },
 

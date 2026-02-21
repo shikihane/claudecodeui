@@ -81,12 +81,6 @@ export function useSlashCommands({
 
   useEffect(() => {
     const fetchCommands = async () => {
-      if (!selectedProject) {
-        setSlashCommands([]);
-        setFilteredCommands([]);
-        return;
-      }
-
       try {
         const response = await authenticatedFetch('/api/commands/list', {
           method: 'POST',
@@ -94,7 +88,7 @@ export function useSlashCommands({
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            projectPath: selectedProject.path,
+            projectPath: selectedProject?.path,
           }),
         });
 
@@ -114,7 +108,7 @@ export function useSlashCommands({
           })),
         ];
 
-        const parsedHistory = readCommandHistory(selectedProject.name);
+        const parsedHistory = selectedProject ? readCommandHistory(selectedProject.name) : {};
         const sortedCommands = [...allCommands].sort((commandA, commandB) => {
           const commandAUsage = parsedHistory[commandA.name] || 0;
           const commandBUsage = parsedHistory[commandB.name] || 0;
@@ -221,7 +215,7 @@ export function useSlashCommands({
 
   const handleCommandSelect = useCallback(
     (command: SlashCommand | null, index: number, isHover: boolean) => {
-      if (!command || !selectedProject) {
+      if (!command) {
         return;
       }
 

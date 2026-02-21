@@ -91,6 +91,36 @@ const finalizeStreamingMessage = (setChatMessages: Dispatch<SetStateAction<ChatM
   });
 };
 
+const appendStreamingThinking = (
+  setChatMessages: Dispatch<SetStateAction<ChatMessage[]>>,
+  content: string,
+) => {
+  if (!content) return;
+  setChatMessages((previous) => {
+    const updated = [...previous];
+    const lastIndex = updated.length - 1;
+    const last = updated[lastIndex];
+    if (last && last.type === 'assistant' && last.isThinking && !last.isToolUse && last.isStreaming) {
+      updated[lastIndex] = { ...last, content: (last.content || '') + content };
+    } else {
+      updated.push({ type: 'assistant', content, timestamp: new Date(), isThinking: true, isStreaming: true });
+    }
+    return updated;
+  });
+};
+
+const finalizeStreamingThinking = (setChatMessages: Dispatch<SetStateAction<ChatMessage[]>>) => {
+  setChatMessages((previous) => {
+    const updated = [...previous];
+    const lastIndex = updated.length - 1;
+    const last = updated[lastIndex];
+    if (last && last.type === 'assistant' && last.isThinking && last.isStreaming) {
+      updated[lastIndex] = { ...last, isStreaming: false };
+    }
+    return updated;
+  });
+};
+
 export function useChatRealtimeHandlers({
   latestMessage,
   provider,
@@ -115,6 +145,13 @@ export function useChatRealtimeHandlers({
   onNavigateToSession,
 }: UseChatRealtimeHandlersArgs) {
   const lastProcessedMessageRef = useRef<LatestChatMessage | null>(null);
+  // Refs for streaming thinking blocks
+  const thinkingStreamBufferRef = useRef('');
+  const thinkingStreamTimerRef = useRef<number | null>(null);
+  const isThinkingBlockActiveRef = useRef(false);
+  // Deduplication: track whether text/thinking were already rendered via stream_event
+  const hasStreamedTextRef = useRef(false);
+  const hasStreamedThinkingRef = useRef(false);
 
   useEffect(() => {
     if (!latestMessage) {
@@ -261,32 +298,81 @@ export function useChatRealtimeHandlers({
         break;
 
       case 'claude-response': {
-        if (messageData && typeof messageData === 'object' && messageData.type) {
-          if (messageData.type === 'content_block_delta' && messageData.delta?.text) {
-            const decodedText = decodeHtmlEntities(messageData.delta.text);
-            streamBufferRef.current += decodedText;
-            if (!streamTimerRef.current) {
-              streamTimerRef.current = window.setTimeout(() => {
-                const chunk = streamBufferRef.current;
-                streamBufferRef.current = '';
-                streamTimerRef.current = null;
-                appendStreamingChunk(setChatMessages, chunk, false);
-              }, 100);
+        // Handle SDKPartialAssistantMessage: { type: 'stream_event', event: RawMessageStreamEvent }
+        if (messageData && typeof messageData === 'object' && messageData.type === 'stream_event') {
+          const event = messageData.event as Record<string, any> | undefined;
+          if (!event) return;
+
+          if (event.type === 'message_start') {
+            // New assistant message starting — reset streaming deduplication flags
+            hasStreamedTextRef.current = false;
+            hasStreamedThinkingRef.current = false;
+            return;
+          }
+
+          if (event.type === 'content_block_start') {
+            isThinkingBlockActiveRef.current = event.content_block?.type === 'thinking';
+            return;
+          }
+
+          if (event.type === 'content_block_delta') {
+            if (event.delta?.type === 'text_delta' && event.delta?.text) {
+              hasStreamedTextRef.current = true;
+              const decodedText = decodeHtmlEntities(event.delta.text);
+              streamBufferRef.current += decodedText;
+              if (!streamTimerRef.current) {
+                streamTimerRef.current = window.setTimeout(() => {
+                  const chunk = streamBufferRef.current;
+                  streamBufferRef.current = '';
+                  streamTimerRef.current = null;
+                  appendStreamingChunk(setChatMessages, chunk, false);
+                }, 100);
+              }
+            } else if (event.delta?.type === 'thinking_delta' && event.delta?.thinking) {
+              hasStreamedThinkingRef.current = true;
+              thinkingStreamBufferRef.current += event.delta.thinking;
+              if (!thinkingStreamTimerRef.current) {
+                thinkingStreamTimerRef.current = window.setTimeout(() => {
+                  const content = thinkingStreamBufferRef.current;
+                  thinkingStreamBufferRef.current = '';
+                  thinkingStreamTimerRef.current = null;
+                  appendStreamingThinking(setChatMessages, content);
+                }, 100);
+              }
             }
             return;
           }
 
-          if (messageData.type === 'content_block_stop') {
-            if (streamTimerRef.current) {
-              clearTimeout(streamTimerRef.current);
-              streamTimerRef.current = null;
+          if (event.type === 'content_block_stop') {
+            if (isThinkingBlockActiveRef.current) {
+              // Flush and finalize a streaming thinking block
+              if (thinkingStreamTimerRef.current) {
+                clearTimeout(thinkingStreamTimerRef.current);
+                thinkingStreamTimerRef.current = null;
+              }
+              const content = thinkingStreamBufferRef.current;
+              thinkingStreamBufferRef.current = '';
+              isThinkingBlockActiveRef.current = false;
+              if (content) {
+                appendStreamingThinking(setChatMessages, content);
+                finalizeStreamingThinking(setChatMessages);
+              }
+            } else {
+              // Flush and finalize a streaming text block
+              if (streamTimerRef.current) {
+                clearTimeout(streamTimerRef.current);
+                streamTimerRef.current = null;
+              }
+              const chunk = streamBufferRef.current;
+              streamBufferRef.current = '';
+              appendStreamingChunk(setChatMessages, chunk, false);
+              finalizeStreamingMessage(setChatMessages);
             }
-            const chunk = streamBufferRef.current;
-            streamBufferRef.current = '';
-            appendStreamingChunk(setChatMessages, chunk, false);
-            finalizeStreamingMessage(setChatMessages);
             return;
           }
+
+          // Ignore other stream events (message_delta, message_stop, ping, etc.)
+          return;
         }
 
         if (
@@ -393,7 +479,23 @@ export function useChatRealtimeHandlers({
               return;
             }
 
+            if (part.type === 'thinking' && part.thinking?.trim()) {
+              // Skip if this thinking block was already rendered via stream_event
+              if (hasStreamedThinkingRef.current) return;
+              setChatMessages((previous) => [
+                ...previous,
+                {
+                  type: 'assistant',
+                  content: part.thinking,
+                  timestamp: new Date(),
+                  isThinking: true,
+                },
+              ]);
+            }
+
             if (part.type === 'text' && part.text?.trim()) {
+              // Skip if this text was already rendered via stream_event
+              if (hasStreamedTextRef.current) return;
               let content = decodeHtmlEntities(part.text);
               content = formatUsageLimitText(content);
               setChatMessages((previous) => [

@@ -145,10 +145,21 @@ const CommandMenu = ({
     groupedCommands.frequent = frequentCommands;
   }
 
-  // Order: frequent, builtin, project, user, other.
-  const namespaceOrder = hasFrequentCommands
-    ? ['frequent', 'builtin', 'project', 'user', 'other']
-    : ['builtin', 'project', 'user', 'other'];
+  // Order: frequent, builtin, project, user, user-skill, plugin:*, other.
+  const knownOrder = hasFrequentCommands
+    ? ['frequent', 'builtin', 'project', 'user', 'user-skill']
+    : ['builtin', 'project', 'user', 'user-skill'];
+  // Collect plugin namespaces (plugin:xxx) and any other unknown namespaces.
+  const knownSet = new Set([...knownOrder, 'other']);
+  const extraNamespaces = Object.keys(groupedCommands)
+    .filter((ns) => !knownSet.has(ns))
+    .sort((a, b) => {
+      // plugin: namespaces first, then others
+      const aPlugin = a.startsWith('plugin:') ? 0 : 1;
+      const bPlugin = b.startsWith('plugin:') ? 0 : 1;
+      return aPlugin - bPlugin || a.localeCompare(b);
+    });
+  const namespaceOrder = [...knownOrder, ...extraNamespaces, 'other'];
   const orderedNamespaces = namespaceOrder.filter((ns) => groupedCommands[ns]);
 
   const namespaceLabels = {
@@ -156,6 +167,7 @@ const CommandMenu = ({
     builtin: 'Built-in Commands',
     project: 'Project Commands',
     user: 'User Commands',
+    'user-skill': '\uD83E\uDDE9 User Skills',
     other: 'Other Commands',
   };
 
@@ -201,7 +213,7 @@ const CommandMenu = ({
                 letterSpacing: '0.05em',
               }}
             >
-              {namespaceLabels[namespace] || namespace}
+              {namespaceLabels[namespace] || (namespace.startsWith('plugin:') ? `\uD83D\uDD0C ${namespace.replace('plugin:', '')}` : namespace)}
             </div>
           )}
 
@@ -254,8 +266,10 @@ const CommandMenu = ({
                       {namespace === 'builtin' && '\u26A1'}
                       {namespace === 'project' && '\uD83D\uDCC1'}
                       {namespace === 'user' && '\uD83D\uDC64'}
+                      {namespace === 'user-skill' && '\uD83E\uDDE9'}
                       {namespace === 'other' && '\uD83D\uDCDD'}
                       {namespace === 'frequent' && '\u2B50'}
+                      {namespace.startsWith('plugin:') && '\uD83D\uDD0C'}
                     </span>
 
                     {/* Command name */}

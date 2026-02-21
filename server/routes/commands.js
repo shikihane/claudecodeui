@@ -12,6 +12,109 @@ const __dirname = path.dirname(__filename);
 const router = express.Router();
 
 /**
+ * Scan user skills from ~/.claude/skills/
+ * Each subdirectory is a skill with a SKILL.md file.
+ * @param {string} skillsDir - Path to ~/.claude/skills/
+ * @returns {Promise<Array>} Array of skill command objects
+ */
+async function scanUserSkills(skillsDir) {
+  const skills = [];
+  try {
+    await fs.access(skillsDir);
+    const entries = await fs.readdir(skillsDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const skillMdPath = path.join(skillsDir, entry.name, 'SKILL.md');
+      try {
+        const content = await fs.readFile(skillMdPath, 'utf8');
+        const { data: frontmatter } = matter(content);
+        const skillName = frontmatter.name || entry.name;
+        const description = frontmatter.description || '';
+        skills.push({
+          name: `/${skillName}`,
+          description,
+          namespace: 'user-skill',
+          path: skillMdPath,
+          metadata: frontmatter,
+        });
+      } catch (err) {
+        // No SKILL.md or parse error — skip
+      }
+    }
+  } catch (err) {
+    if (err.code !== 'ENOENT' && err.code !== 'EACCES') {
+      console.error('Error scanning user skills:', err.message);
+    }
+  }
+  return skills;
+}
+
+/**
+ * Scan plugin skills from ~/.claude/plugins/
+ * Reads installed_plugins.json to find each plugin's installPath,
+ * then scans installPath/skills/ for SKILL.md files.
+ * Command name format: /{plugin-name}:{skill-name}
+ * @param {string} pluginsDir - Path to ~/.claude/plugins/
+ * @returns {Promise<Array>} Array of plugin skill command objects
+ */
+async function scanPluginSkills(pluginsDir) {
+  const skills = [];
+  const installedJson = path.join(pluginsDir, 'installed_plugins.json');
+
+  try {
+    const content = await fs.readFile(installedJson, 'utf8');
+    const data = JSON.parse(content);
+    const plugins = data.plugins || {};
+
+    const seen = new Set();
+
+    for (const [pluginKey, installations] of Object.entries(plugins)) {
+      const pluginName = pluginKey.split('@')[0];
+      if (!installations || !installations.length) continue;
+
+      const installPath = installations[0].installPath;
+      if (!installPath) continue;
+
+      const dedupeKey = `${pluginName}:${installPath}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+
+      const skillsSubDir = path.join(installPath, 'skills');
+      try {
+        await fs.access(skillsSubDir);
+        const entries = await fs.readdir(skillsSubDir, { withFileTypes: true });
+        for (const entry of entries) {
+          if (!entry.isDirectory()) continue;
+          const skillMdPath = path.join(skillsSubDir, entry.name, 'SKILL.md');
+          try {
+            const content = await fs.readFile(skillMdPath, 'utf8');
+            const { data: frontmatter } = matter(content);
+            const skillName = frontmatter.name || entry.name;
+            const description = frontmatter.description || '';
+            skills.push({
+              name: `/${pluginName}:${skillName}`,
+              description,
+              namespace: `plugin:${pluginName}`,
+              path: skillMdPath,
+              metadata: frontmatter,
+            });
+          } catch (err) {
+            // No SKILL.md or parse error — skip
+          }
+        }
+      } catch (err) {
+        // No skills/ directory in this plugin — skip
+      }
+    }
+  } catch (err) {
+    if (err.code !== 'ENOENT' && err.code !== 'EACCES') {
+      console.error('Error scanning plugin skills:', err.message);
+    }
+  }
+  return skills;
+}
+
+/**
  * Recursively scan directory for command files (.md)
  * @param {string} dir - Directory to scan
  * @param {string} baseDir - Base directory for relative paths
@@ -429,11 +532,25 @@ router.post('/list', async (req, res) => {
     );
     allCommands.push(...userCommands);
 
+    // Scan user skills (~/.claude/skills/)
+    const userSkillsDir = path.join(homeDir, '.claude', 'skills');
+    const userSkills = await scanUserSkills(userSkillsDir);
+    console.log('[commands/list] userSkills:', userSkills.length, userSkillsDir);
+    allCommands.push(...userSkills);
+
+    // Scan plugin skills (~/.claude/plugins/)
+    const pluginsDir = path.join(homeDir, '.claude', 'plugins');
+    const pluginSkills = await scanPluginSkills(pluginsDir);
+    console.log('[commands/list] pluginSkills:', pluginSkills.length, pluginsDir);
+    allCommands.push(...pluginSkills);
+
     // Separate built-in and custom commands
     const customCommands = allCommands.filter(cmd => cmd.namespace !== 'builtin');
 
     // Sort commands alphabetically by name
     customCommands.sort((a, b) => a.name.localeCompare(b.name));
+
+    console.log('[commands/list] total:', allCommands.length, '(builtIn:', builtInCommands.length, 'custom:', customCommands.length, ')');
 
     res.json({
       builtIn: builtInCommands,

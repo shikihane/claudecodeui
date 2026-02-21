@@ -25,7 +25,7 @@ export default function MainContentHeader({
           />
         </div>
 
-        <div className="flex-shrink-0 hidden sm:block">
+        <div className="flex-shrink-0">
           <MainContentTabSwitcher
             activeTab={activeTab}
             setActiveTab={setActiveTab}

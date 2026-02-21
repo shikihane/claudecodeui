@@ -283,8 +283,8 @@ export function useChatComposerState({
           commandMatch && commandMatch[1] ? commandMatch[1].trim().split(/\s+/) : [];
 
         const context = {
-          projectPath: selectedProject.fullPath || selectedProject.path,
-          projectName: selectedProject.name,
+          projectPath: selectedProject ? (selectedProject.fullPath || selectedProject.path) : undefined,
+          projectName: selectedProject?.name,
           sessionId: currentSessionId,
           provider,
           model: provider === 'cursor' ? cursorModel : provider === 'codex' ? codexModel : claudeModel,
