@@ -10,13 +10,15 @@ import { useWebSocket } from '../../contexts/WebSocketContext';
 import { useDeviceSettings } from '../../hooks/useDeviceSettings';
 import { useSessionProtection } from '../../hooks/useSessionProtection';
 import { useProjectsState } from '../../hooks/useProjectsState';
+import { useRef } from 'react';
 
 export default function AppContent() {
   const navigate = useNavigate();
   const { sessionId } = useParams<{ sessionId?: string }>();
   const { t } = useTranslation('common');
   const { isMobile } = useDeviceSettings({ trackPWA: false });
-  const { ws, sendMessage, latestMessage } = useWebSocket();
+  const { ws, sendMessage, latestMessage, isConnected } = useWebSocket();
+  const wasConnectedRef = useRef(false);
 
   const {
     activeSessions,
@@ -70,6 +72,25 @@ export default function AppContent() {
       }
     };
   }, [openSettings]);
+
+  // Permission recovery: query pending permissions on WebSocket connection/reconnection
+  useEffect(() => {
+    // Detect connection/reconnection: was disconnected, now connected
+    if (isConnected && !wasConnectedRef.current) {
+      wasConnectedRef.current = true;
+
+      // Query pending permissions for current session
+      if (selectedSession?.id) {
+        console.log('🔄 WebSocket reconnected, querying pending permissions for session:', selectedSession.id);
+        sendMessage({
+          type: 'get-pending-permissions',
+          sessionId: selectedSession.id
+        });
+      }
+    } else if (!isConnected) {
+      wasConnectedRef.current = false;
+    }
+  }, [isConnected, selectedSession?.id, sendMessage]);
 
   return (
     <div className="fixed inset-0 flex bg-background">

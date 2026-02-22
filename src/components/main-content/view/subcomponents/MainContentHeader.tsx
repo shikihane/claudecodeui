@@ -1,6 +1,8 @@
 import MobileMenuButton from './MobileMenuButton';
 import MainContentTabSwitcher from './MainContentTabSwitcher';
 import MainContentTitle from './MainContentTitle';
+import BackgroundTasksPopover from '../../../app/BackgroundTasksPopover';
+import ServerStatusIndicator from '../../../app/ServerStatusIndicator';
 import type { MainContentHeaderProps } from '../../types/types';
 
 export default function MainContentHeader({
@@ -25,7 +27,9 @@ export default function MainContentHeader({
           />
         </div>
 
-        <div className="flex-shrink-0">
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <ServerStatusIndicator />
+          <BackgroundTasksPopover currentSessionId={selectedSession?.id} />
           <MainContentTabSwitcher
             activeTab={activeTab}
             setActiveTab={setActiveTab}

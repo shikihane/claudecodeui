@@ -21,8 +21,26 @@ import { CLAUDE_MODELS } from '../shared/modelConstants.js';
 
 const activeSessions = new Map();
 const pendingToolApprovals = new Map();
+const backgroundTasks = new Map(); // taskId -> task info
+const backgroundTaskOutputs = new Map(); // taskId -> output string
+const BACKGROUND_TASKS_MAX = 100;
 
-const TOOL_APPROVAL_TIMEOUT_MS = parseInt(process.env.CLAUDE_TOOL_APPROVAL_TIMEOUT_MS, 10) || 55000;
+/**
+ * Evicts oldest completed tasks when backgroundTasks exceeds the size limit.
+ * Only removes entries with status === 'completed'; running tasks are never evicted.
+ */
+function evictOldestCompletedTasks() {
+  if (backgroundTasks.size <= BACKGROUND_TASKS_MAX) return;
+
+  for (const [taskId, task] of backgroundTasks) {
+    if (backgroundTasks.size <= BACKGROUND_TASKS_MAX) break;
+    if (task.status === 'completed') {
+      backgroundTasks.delete(taskId);
+    }
+  }
+}
+
+const TOOL_APPROVAL_TIMEOUT_MS = parseInt(process.env.CLAUDE_TOOL_APPROVAL_TIMEOUT_MS, 10) || (8 * 60 * 60 * 1000); // 8 hours (28800000ms)
 
 const TOOLS_REQUIRING_INTERACTION = new Set(['AskUserQuestion']);
 
@@ -34,7 +52,7 @@ function createRequestId() {
 }
 
 function waitForToolApproval(requestId, options = {}) {
-  const { timeoutMs = TOOL_APPROVAL_TIMEOUT_MS, signal, onCancel } = options;
+  const { timeoutMs = TOOL_APPROVAL_TIMEOUT_MS, signal, onCancel, toolName, input, sessionId, context } = options;
 
   return new Promise(resolve => {
     let settled = false;
@@ -78,16 +96,24 @@ function waitForToolApproval(requestId, options = {}) {
       signal.addEventListener('abort', abortHandler, { once: true });
     }
 
-    pendingToolApprovals.set(requestId, (decision) => {
-      finalize(decision);
+    // Store approval data along with resolver function
+    pendingToolApprovals.set(requestId, {
+      toolName,
+      input,
+      sessionId,
+      context,
+      createdAt: Date.now(),
+      resolve: (decision) => {
+        finalize(decision);
+      }
     });
   });
 }
 
 function resolveToolApproval(requestId, decision) {
-  const resolver = pendingToolApprovals.get(requestId);
-  if (resolver) {
-    resolver(decision);
+  const approval = pendingToolApprovals.get(requestId);
+  if (approval && approval.resolve) {
+    approval.resolve(decision);
   }
 }
 
@@ -464,6 +490,9 @@ async function queryClaudeSDK(command, options = {}, ws) {
   let tempImagePaths = [];
   let tempDir = null;
 
+  const activeBashToolIds = new Set();
+  const backgroundBashToolIds = new Set();
+
   try {
     // Map CLI options to SDK format
     const sdkOptions = mapCliOptionsToSDK(options);
@@ -515,6 +544,10 @@ async function queryClaudeSDK(command, options = {}, ws) {
       const decision = await waitForToolApproval(requestId, {
         timeoutMs: requiresInteraction ? 0 : undefined,
         signal: context?.signal,
+        toolName,
+        input,
+        sessionId: capturedSessionId || sessionId || null,
+        context,
         onCancel: (reason) => {
           ws.send({
             type: 'claude-permission-cancelled',
@@ -570,7 +603,10 @@ async function queryClaudeSDK(command, options = {}, ws) {
 
     // Process streaming messages
     console.log('Starting async generator loop for session:', capturedSessionId || 'NEW');
+    let messageCount = 0;
     for await (const message of queryInstance) {
+      messageCount++;
+      console.log(`[DEBUG] Received message #${messageCount}, type:`, message.type, 'session:', capturedSessionId || 'NEW');
       // Capture session ID from first message
       if (message.session_id && !capturedSessionId) {
 
@@ -604,6 +640,145 @@ async function queryClaudeSDK(command, options = {}, ws) {
         sessionId: capturedSessionId || sessionId || null
       });
 
+      // Detect background tasks (Task/Bash with run_in_background=true)
+      const messageData = message.message || message;
+      if (messageData && Array.isArray(messageData.content)) {
+        messageData.content.forEach((part) => {
+          if (part.type === 'tool_use') {
+            const toolName = part.name;
+            const toolInput = part.input;
+            const toolId = part.id;
+
+            // Track all Bash commands
+            if (toolName === 'Bash') {
+              activeBashToolIds.add(toolId);
+              // Track background bash commands separately — these won't get bash-completed
+              // because CLI returns tool_result immediately while command keeps running
+              if (toolInput.run_in_background) {
+                console.log(`[DEBUG] Background Bash task detected: ${toolId}, command:`, toolInput.command);
+                backgroundBashToolIds.add(toolId);
+
+                // Also add to backgroundTasks for kill-task functionality
+                const taskInfo = {
+                  taskId: toolId,
+                  toolName: 'Bash',
+                  input: toolInput,
+                  sessionId: capturedSessionId || sessionId || null,
+                  startTime: Date.now(),
+                  status: 'running'
+                };
+                backgroundTasks.set(toolId, taskInfo);
+                evictOldestCompletedTasks();
+              }
+              ws.send({
+                type: 'bash-started',
+                sessionId: capturedSessionId || sessionId || null,
+                bash: {
+                  id: toolId,
+                  command: toolInput.command,
+                  description: toolInput.description,
+                  run_in_background: toolInput.run_in_background || false,
+                  startTime: Date.now()
+                }
+              });
+            }
+
+            // Check if this is a background task (non-Bash tools only — Bash uses bash-started)
+            if (toolInput && toolInput.run_in_background && toolName !== 'Bash') {
+              const taskInfo = {
+                taskId: toolId,
+                toolName,
+                input: toolInput,
+                sessionId: capturedSessionId || sessionId || null,
+                startTime: Date.now(),
+                status: 'running'
+              };
+
+              backgroundTasks.set(toolId, taskInfo);
+              evictOldestCompletedTasks();
+
+              ws.send({
+                type: 'background-task-started',
+                sessionId: capturedSessionId || sessionId || null,
+                task: taskInfo
+              });
+            }
+          }
+
+          // Detect task completion (tool_result for background tasks and bash commands)
+          if (part.type === 'tool_result') {
+            const toolUseId = part.tool_use_id;
+
+            // Capture output for background bash tasks
+            if (backgroundBashToolIds.has(toolUseId)) {
+              console.log(`[DEBUG] tool_result for background Bash task: ${toolUseId}`);
+              const rawContent = typeof part.content === 'string' ? part.content
+                : Array.isArray(part.content) ? part.content.map(c => c.text || '').join('')
+                : '';
+
+              // Parse output file path from CLI response like:
+              // "Command running in background with ID: xxx. Output is being written to: /path/to/file"
+              const outputFileMatch = rawContent.match(/Output is being written to:\s*(\S+)/);
+              if (outputFileMatch) {
+                // Resolve /tmp/ to Windows path
+                // On Windows with Git Bash, /tmp maps to E:\tmp (or current drive:\tmp)
+                let outputPath = outputFileMatch[1];
+                if (outputPath.startsWith('/tmp/') && process.platform === 'win32') {
+                  // Convert /tmp/... to E:\tmp\... (or current drive)
+                  const driveLetter = process.cwd()[0]; // Get current drive letter
+                  outputPath = outputPath.replace('/tmp/', `${driveLetter}:\\tmp\\`).replace(/\//g, '\\');
+                }
+
+                // Get command text from backgroundTasks
+                const task = backgroundTasks.get(toolUseId);
+                const commandText = task?.input?.command || '';
+
+                backgroundTaskOutputs.set(toolUseId, {
+                  type: 'file',
+                  path: outputPath,
+                  command: commandText
+                });
+              }
+              // Always store the raw CLI response
+              if (rawContent) {
+                const existing = backgroundTaskOutputs.get(toolUseId);
+                if (existing) {
+                  existing.cliResponse = rawContent;
+                } else {
+                  backgroundTaskOutputs.set(toolUseId, { type: 'inline', content: rawContent });
+                }
+              }
+            }
+
+            // Send bash-completed for tracked bash commands (skip background ones — they keep running)
+            if (activeBashToolIds.has(toolUseId) && !backgroundBashToolIds.has(toolUseId)) {
+              activeBashToolIds.delete(toolUseId);
+              ws.send({
+                type: 'bash-completed',
+                sessionId: capturedSessionId || sessionId || null,
+                bash: { id: toolUseId, endTime: Date.now() }
+              });
+            }
+
+            const task = backgroundTasks.get(toolUseId);
+
+            if (task && !backgroundBashToolIds.has(toolUseId)) {
+              task.status = 'completed';
+              task.endTime = Date.now();
+              evictOldestCompletedTasks();
+
+              ws.send({
+                type: 'background-task-completed',
+                sessionId: task.sessionId,
+                taskId: toolUseId
+              });
+
+              // Background task completed
+            }
+          }
+        });
+      }
+
       // Extract and send token budget updates from result messages
       if (message.type === 'result') {
         const tokenBudget = extractTokenBudget(message);
@@ -617,6 +792,8 @@ async function queryClaudeSDK(command, options = {}, ws) {
         }
       }
     }
+
+    console.log(`[DEBUG] Async generator loop completed. Total messages: ${messageCount}, session:`, capturedSessionId || 'NEW');
 
     // Clean up session on completion
     if (capturedSessionId) {
@@ -711,11 +888,37 @@ function getActiveClaudeSDKSessions() {
   return getAllSessions();
 }
 
+/**
+ * Get pending permission requests for a specific session (read-only query).
+ * Returns an array of approval metadata without exposing internal resolve functions.
+ * @param {string} sessionId - The session ID to query
+ * @returns {Array} Array of pending approval metadata
+ */
+function getPendingApprovalsForSession(sessionId) {
+  const pending = [];
+  for (const [requestId, approval] of pendingToolApprovals.entries()) {
+    if (approval.sessionId === sessionId) {
+      pending.push({
+        requestId,
+        toolName: approval.toolName,
+        input: approval.input,
+        context: approval.context,
+        sessionId: approval.sessionId,
+        createdAt: approval.createdAt
+      });
+    }
+  }
+  return pending;
+}
+
 // Export public API
 export {
   queryClaudeSDK,
   abortClaudeSDKSession,
   isClaudeSDKSessionActive,
   getActiveClaudeSDKSessions,
-  resolveToolApproval
+  resolveToolApproval,
+  getPendingApprovalsForSession,
+  backgroundTasks,
+  backgroundTaskOutputs
 };

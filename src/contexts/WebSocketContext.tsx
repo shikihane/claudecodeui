@@ -2,11 +2,14 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { useAuth } from './AuthContext';
 import { IS_PLATFORM } from '../constants/config';
 
+type MessageListener = (message: any) => void;
+
 type WebSocketContextType = {
   ws: WebSocket | null;
   sendMessage: (message: any) => void;
   latestMessage: any | null;
   isConnected: boolean;
+  subscribe: (listener: MessageListener) => () => void;
 };
 
 const WebSocketContext = createContext<WebSocketContextType | null>(null);
@@ -32,11 +35,17 @@ const useWebSocketProviderState = (): WebSocketContextType => {
   const [latestMessage, setLatestMessage] = useState<any>(null);
   const [isConnected, setIsConnected] = useState(false);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const listenersRef = useRef<Set<MessageListener>>(new Set());
   const { token } = useAuth();
+
+  const subscribe = useCallback((listener: MessageListener) => {
+    listenersRef.current.add(listener);
+    return () => { listenersRef.current.delete(listener); };
+  }, []);
 
   useEffect(() => {
     connect();
-    
+
     return () => {
       unmountedRef.current = true;
       if (reconnectTimeoutRef.current) {
@@ -55,7 +64,7 @@ const useWebSocketProviderState = (): WebSocketContextType => {
       const wsUrl = buildWebSocketUrl(token);
 
       if (!wsUrl) return console.warn('No authentication token found for WebSocket connection');
-      
+
       const websocket = new WebSocket(wsUrl);
 
       websocket.onopen = () => {
@@ -67,6 +76,8 @@ const useWebSocketProviderState = (): WebSocketContextType => {
         try {
           const data = JSON.parse(event.data);
           setLatestMessage(data);
+          // Notify all subscribers synchronously — no batching, no lost messages
+          listenersRef.current.forEach(listener => listener(data));
         } catch (error) {
           console.error('Error parsing WebSocket message:', error);
         }
@@ -75,7 +86,7 @@ const useWebSocketProviderState = (): WebSocketContextType => {
       websocket.onclose = () => {
         setIsConnected(false);
         wsRef.current = null;
-        
+
         // Attempt to reconnect after 3 seconds
         reconnectTimeoutRef.current = setTimeout(() => {
           if (unmountedRef.current) return; // Prevent reconnection if unmounted
@@ -106,15 +117,16 @@ const useWebSocketProviderState = (): WebSocketContextType => {
     ws: wsRef.current,
     sendMessage,
     latestMessage,
-    isConnected
-  }), [sendMessage, latestMessage, isConnected]);
+    isConnected,
+    subscribe
+  }), [sendMessage, latestMessage, isConnected, subscribe]);
 
   return value;
 };
 
 export const WebSocketProvider = ({ children }: { children: React.ReactNode }) => {
   const webSocketData = useWebSocketProviderState();
-  
+
   return (
     <WebSocketContext.Provider value={webSocketData}>
       {children}

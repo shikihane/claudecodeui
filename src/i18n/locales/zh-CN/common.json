@@ -22,7 +22,8 @@
     "shell": "终端",
     "files": "文件",
     "git": "源代码管理",
-    "tasks": "任务"
+    "tasks": "任务",
+    "background": "后台任务"
   },
   "status": {
     "loading": "加载中...",

@@ -36,14 +36,18 @@ import { WebSocketServer, WebSocket } from 'ws';
 import os from 'os';
 import http from 'http';
 import cors from 'cors';
+import crypto from 'crypto';
 import { promises as fsPromises } from 'fs';
-import { spawn } from 'child_process';
+import { spawn, exec } from 'child_process';
+import { promisify } from 'util';
+
+const execAsync = promisify(exec);
 import pty from 'node-pty';
 import fetch from 'node-fetch';
 import mime from 'mime-types';
 
 import { getProjects, getSessions, getSessionMessages, renameProject, deleteSession, deleteProject, addProjectManually, extractProjectDirectory, clearProjectDirectoryCache } from './projects.js';
-import { queryClaudeSDK, abortClaudeSDKSession, isClaudeSDKSessionActive, getActiveClaudeSDKSessions, resolveToolApproval } from './claude-sdk.js';
+import { queryClaudeSDK, abortClaudeSDKSession, isClaudeSDKSessionActive, getActiveClaudeSDKSessions, resolveToolApproval, getPendingApprovalsForSession, backgroundTasks, backgroundTaskOutputs } from './claude-sdk.js';
 import { spawnCursor, abortCursorSession, isCursorSessionActive, getActiveCursorSessions } from './cursor-cli.js';
 import { queryCodex, abortCodexSession, isCodexSessionActive, getActiveCodexSessions } from './openai-codex.js';
 import gitRoutes from './routes/git.js';
@@ -62,6 +66,129 @@ import codexRoutes from './routes/codex.js';
 import { initializeDatabase } from './database/db.js';
 import { validateApiKey, authenticateToken, authenticateWebSocket } from './middleware/auth.js';
 import { IS_PLATFORM } from './constants/config.js';
+
+/**
+ * Truncates output text to a maximum number of lines, keeping the tail.
+ * Used by query-task-output handler; available for future TaskOutput integration.
+ * @param {string} output - The raw output text
+ * @param {number} maxLines - Maximum lines to retain
+ * @returns {{ content: string, truncated: boolean, totalLines: number, skippedLines?: number }}
+ */
+function truncateOutput(output, maxLines) {
+    const lines = output.split('\n');
+
+    if (lines.length <= maxLines) {
+        return {
+            content: output,
+            truncated: false,
+            totalLines: lines.length
+        };
+    }
+
+    const truncatedLines = lines.slice(-maxLines);
+    return {
+        content: truncatedLines.join('\n'),
+        truncated: true,
+        totalLines: lines.length,
+        skippedLines: lines.length - maxLines
+    };
+}
+
+/**
+ * Find and kill a background bash process by command text (cross-platform)
+ * @param {string} commandText - The command text to search for
+ * @returns {Promise<{success: boolean, pids?: number[], error?: string}>}
+ */
+async function killBackgroundProcess(commandText) {
+    const platform = process.platform;
+    const isWindows = platform === 'win32';
+
+    try {
+        let pids = [];
+
+        // Extract a unique identifier from the command (remove quotes and special chars for matching)
+        // This helps match commands even when they're wrapped with eval and escaped
+        const normalizedCommand = commandText
+            .replace(/['"\\]/g, '')  // Remove quotes and backslashes
+            .substring(0, 50)
+            .trim();
+
+        if (isWindows) {
+            // Windows: Use wmic to find bash processes
+            const { stdout } = await execAsync(
+                `wmic process where "name='bash.exe'" get ProcessId,CommandLine`,
+                { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 }
+            );
+
+            // Parse wmic output to find matching processes
+            const lines = stdout.split('\n');
+            for (const line of lines) {
+                // Normalize the command line for comparison
+                const normalizedLine = line.replace(/['"\\]/g, '');
+
+                if (normalizedLine.includes(normalizedCommand)) {
+                    // Extract PID (last number in the line)
+                    const pidMatch = line.trim().match(/(\d+)\s*$/);
+                    if (pidMatch) {
+                        pids.push(parseInt(pidMatch[1]));
+                    }
+                }
+            }
+
+            // Kill all matching processes
+            for (const pid of pids) {
+                try {
+                    await execAsync(`taskkill /F /PID ${pid}`);
+                } catch (e) {
+                    // Process might already be dead
+                }
+            }
+        } else {
+            // Linux/Mac: Use ps and grep
+            try {
+                const { stdout } = await execAsync(
+                    `ps aux | grep "${normalizedCommand}" | grep -v grep`,
+                    { encoding: 'utf8' }
+                );
+
+                // Parse ps output to extract PIDs
+                const lines = stdout.trim().split('\n');
+                for (const line of lines) {
+                    const parts = line.trim().split(/\s+/);
+                    if (parts.length >= 2) {
+                        pids.push(parseInt(parts[1]));
+                    }
+                }
+
+                // Kill all matching processes
+                for (const pid of pids) {
+                    try {
+                        await execAsync(`kill -9 ${pid}`);
+                    } catch (e) {
+                        // Process might already be dead
+                    }
+                }
+            } catch (e) {
+                // No matching processes found
+            }
+        }
+
+        return {
+            success: pids.length > 0,
+            pids,
+            error: pids.length === 0 ? 'No matching process found' : undefined
+        };
+    } catch (error) {
+        return {
+            success: false,
+            error: error.message
+        };
+    }
+}
+
+// Generate unique server ID on startup to detect server restarts
+const SERVER_ID = crypto.randomUUID();
+console.log('Server ID:', SERVER_ID);
 
 // File system watchers for provider project/session folders
 const PROVIDER_WATCH_PATHS = [
@@ -904,6 +1031,8 @@ class WebSocketWriter {
     if (this.ws.readyState === 1) { // WebSocket.OPEN
       // Providers send raw objects, we stringify for WebSocket
       this.ws.send(JSON.stringify(data));
+    } else {
+      console.warn('[WebSocketWriter] Cannot send message, WebSocket not open. ReadyState:', this.ws.readyState, 'Message type:', data.type);
     }
   }
 
@@ -922,6 +1051,12 @@ function handleChatConnection(ws) {
 
     // Add to connected clients for project updates
     connectedClients.add(ws);
+
+    // Send server info to detect server restarts
+    ws.send(JSON.stringify({
+        type: 'server-info',
+        serverId: SERVER_ID
+    }));
 
     // Wrap WebSocket with writer for consistent interface with SSEStreamWriter
     const writer = new WebSocketWriter(ws);
@@ -1029,6 +1164,121 @@ function handleChatConnection(ws) {
                 writer.send({
                     type: 'active-sessions',
                     sessions: activeSessions
+                });
+            } else if (data.type === 'ping') {
+                // Heartbeat: respond to ping with pong
+                writer.send({
+                    type: 'pong',
+                    timestamp: Date.now()
+                });
+            } else if (data.type === 'get-pending-permissions') {
+                // Query pending permission requests for a session
+                const sessionId = data.sessionId;
+                const pending = getPendingApprovalsForSession(sessionId);
+
+                writer.send({
+                    type: 'pending-permissions',
+                    sessionId,
+                    data: pending
+                });
+            } else if (data.type === 'kill-background-task') {
+                // TODO: This only removes the task from tracking, it does NOT actually kill the underlying process.
+                // The Claude Agent SDK (as of v0.1.71) does not expose an API to terminate individual background tasks.
+                // SDK only provides Query.interrupt() which kills the entire session, not a single task.
+                // CLI internally uses AbortController for each task, but this is not exposed through the SDK protocol.
+                //
+                // Tracking issues:
+                // - https://github.com/anthropics/claude-code/issues/9905 (Background Agent Execution)
+                // - https://github.com/anthropics/claude-code/issues/7069 (Native Background Task Management)
+                // - https://github.com/anthropics/claude-agent-sdk-typescript/issues/120 (V2 API interrupt)
+                //
+                // Current behavior: "Dismiss" the task from UI, but it continues running in the background.
+                // Future: When SDK adds killTask(taskId) API, implement actual process termination here.
+
+                const taskId = data.taskId;
+                const task = backgroundTasks.get(taskId);
+                if (task) {
+                    task.status = 'completed';
+                    task.endTime = Date.now();
+                    backgroundTasks.delete(taskId);
+                }
+                writer.send({
+                    type: 'background-task-deleted',
+                    taskId,
+                    success: !!task
+                });
+            } else if (data.type === 'query-task-output') {
+                const taskId = data.taskId;
+                const maxLines = data.maxLines || 200;
+
+                const entry = backgroundTaskOutputs.get(taskId);
+                let rawOutput = '';
+
+                if (entry && entry.type === 'file') {
+                    try {
+                        rawOutput = await fsPromises.readFile(entry.path, 'utf-8');
+                    } catch (err) {
+                        // Fallback to CLI response if file read fails
+                        rawOutput = entry.cliResponse || '';
+                    }
+                } else if (entry && entry.type === 'inline') {
+                    rawOutput = entry.content;
+                }
+
+                const result = rawOutput ? truncateOutput(rawOutput, maxLines) : {
+                    content: '',
+                    truncated: false,
+                    totalLines: 0
+                };
+
+                writer.send({
+                    type: 'task-output',
+                    taskId,
+                    output: result
+                });
+            } else if (data.type === 'kill-task') {
+                const taskId = data.taskId;
+                const task = backgroundTasks.get(taskId);
+                const entry = backgroundTaskOutputs.get(taskId);
+
+                if (!task && !entry) {
+                    writer.send({
+                        type: 'task-killed',
+                        taskId,
+                        success: false,
+                        error: 'Task not found'
+                    });
+                    return;
+                }
+
+                // Get command text from task or entry
+                const commandText = task?.input?.command || entry?.command || '';
+
+                if (!commandText) {
+                    writer.send({
+                        type: 'task-killed',
+                        taskId,
+                        success: false,
+                        error: 'Command text not available'
+                    });
+                    return;
+                }
+
+                // Try to kill the process
+                const result = await killBackgroundProcess(commandText);
+
+                // Update task status if found
+                if (task) {
+                    task.status = 'completed';
+                    task.endTime = Date.now();
+                }
+
+                writer.send({
+                    type: 'task-killed',
+                    taskId,
+                    success: result.success,
+                    pids: result.pids,
+                    error: result.error
                 });
             }
         } catch (error) {

@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import type { Dispatch, MutableRefObject, SetStateAction } from 'react';
 import { decodeHtmlEntities, formatUsageLimitText } from '../utils/chatFormatting';
 import { safeLocalStorage } from '../utils/chatStorage';
+import { useWebSocket } from '../../../contexts/WebSocketContext';
 import type { ChatMessage, PendingPermissionRequest } from '../types/types';
 import type { Project, ProjectSession, SessionProvider } from '../../../types/app';
 
@@ -152,6 +153,33 @@ export function useChatRealtimeHandlers({
   // Deduplication: track whether text/thinking were already rendered via stream_event
   const hasStreamedTextRef = useRef(false);
   const hasStreamedThinkingRef = useRef(false);
+
+  // State reset on disconnect / server restart
+  const { isConnected, serverId } = useWebSocket();
+  const prevServerIdRef = useRef<string | null>(null);
+
+  // Reset UI state when WebSocket disconnects
+  useEffect(() => {
+    if (!isConnected) {
+      setIsLoading(false);
+      setCanAbortSession(false);
+      setClaudeStatus(null);
+      setPendingPermissionRequests([]);
+    }
+  }, [isConnected, setIsLoading, setCanAbortSession, setClaudeStatus, setPendingPermissionRequests]);
+
+  // Reset UI state when server restarts (different serverId)
+  useEffect(() => {
+    if (serverId && prevServerIdRef.current && serverId !== prevServerIdRef.current) {
+      setIsLoading(false);
+      setCanAbortSession(false);
+      setClaudeStatus(null);
+      setPendingPermissionRequests([]);
+      setTokenBudget(null);
+      window.refreshProjects?.();
+    }
+    prevServerIdRef.current = serverId;
+  }, [serverId, setIsLoading, setCanAbortSession, setClaudeStatus, setPendingPermissionRequests, setTokenBudget]);
 
   useEffect(() => {
     if (!latestMessage) {
@@ -1101,6 +1129,44 @@ export function useChatRealtimeHandlers({
         setClaudeStatus(statusInfo);
         setIsLoading(true);
         setCanAbortSession(statusInfo.can_interrupt);
+        break;
+      }
+
+      case 'pending-permissions': {
+        // Skip permissions for a different session
+        if (latestMessage.sessionId && currentSessionId && latestMessage.sessionId !== currentSessionId) {
+          break;
+        }
+        // Handle permission recovery response from server
+        const serverRequests = latestMessage.data || [];
+
+        // Compare with localStorage
+        if (currentSessionId) {
+          const storageKey = `pending-permissions-${currentSessionId}`;
+          const savedData = localStorage.getItem(storageKey);
+
+          if (savedData) {
+            try {
+              const localRequests = JSON.parse(savedData);
+
+              // If we have local requests but server has none, they're stale
+              if (localRequests.length > 0 && serverRequests.length === 0) {
+                console.warn('⚠️ Pending permission requests are stale (server has none)');
+                localStorage.removeItem(storageKey);
+                setPendingPermissionRequests([]);
+              } else if (serverRequests.length > 0) {
+                // Server has requests, restore them
+                setPendingPermissionRequests(serverRequests);
+              }
+            } catch (error) {
+              console.error('Error parsing saved permission requests:', error);
+              localStorage.removeItem(storageKey);
+            }
+          } else if (serverRequests.length > 0) {
+            // No local data but server has requests, restore them
+            setPendingPermissionRequests(serverRequests);
+          }
+        }
         break;
       }
 

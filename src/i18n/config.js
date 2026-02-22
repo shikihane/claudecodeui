@@ -21,6 +21,7 @@ import enSidebar from './locales/en/sidebar.json';
 import enChat from './locales/en/chat.json';
 import enCodeEditor from './locales/en/codeEditor.json';
 import enTasks from './locales/en/tasks.json';
+import enBackgroundTasks from './locales/en/backgroundTasks.json';
 
 import koCommon from './locales/ko/common.json';
 import koSettings from './locales/ko/settings.json';
@@ -35,6 +36,7 @@ import zhAuth from './locales/zh-CN/auth.json';
 import zhSidebar from './locales/zh-CN/sidebar.json';
 import zhChat from './locales/zh-CN/chat.json';
 import zhCodeEditor from './locales/zh-CN/codeEditor.json';
+import zhBackgroundTasks from './locales/zh-CN/backgroundTasks.json';
 
 import jaCommon from './locales/ja/common.json';
 import jaSettings from './locales/ja/settings.json';
@@ -76,6 +78,7 @@ i18n
         chat: enChat,
         codeEditor: enCodeEditor,
         tasks: enTasks,
+        backgroundTasks: enBackgroundTasks,
       },
       ko: {
         common: koCommon,
@@ -92,6 +95,7 @@ i18n
         sidebar: zhSidebar,
         chat: zhChat,
         codeEditor: zhCodeEditor,
+        backgroundTasks: zhBackgroundTasks,
       },
       ja: {
         common: jaCommon,
@@ -114,7 +118,7 @@ i18n
     debug: import.meta.env.DEV,
 
     // Namespaces - load only what's needed
-    ns: ['common', 'settings', 'auth', 'sidebar', 'chat', 'codeEditor', 'tasks'],
+    ns: ['common', 'settings', 'auth', 'sidebar', 'chat', 'codeEditor', 'tasks', 'backgroundTasks'],
     defaultNS: 'common',
 
     // Key separator for nested keys (default: '.')

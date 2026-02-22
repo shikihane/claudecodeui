@@ -1,0 +1,31 @@
+{
+  "title": "Background Tasks",
+  "tabs": {
+    "subagents": "Subagents",
+    "bash": "Bash"
+  },
+  "empty": {
+    "subagents": "No subagent tasks",
+    "bash": "No bash commands"
+  },
+  "status": {
+    "running": "running",
+    "completed": "completed",
+    "terminating": "terminating...",
+    "background": "background"
+  },
+  "actions": {
+    "dismiss": "Terminate task",
+    "dismissBash": "Terminate command",
+    "remove": "Remove"
+  },
+  "output": {
+    "label": "Output",
+    "showing": "Showing last {{shown}} of {{total}} lines"
+  },
+  "connection": {
+    "online": "Server online",
+    "offline": "Server offline",
+    "unstable": "Server connection unstable"
+  }
+}
