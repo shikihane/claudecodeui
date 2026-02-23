@@ -154,11 +154,9 @@ export function useChatRealtimeHandlers({
   const hasStreamedTextRef = useRef(false);
   const hasStreamedThinkingRef = useRef(false);
 
-  // State reset on disconnect / server restart
-  const { isConnected, serverId } = useWebSocket();
-  const prevServerIdRef = useRef<string | null>(null);
-
   // Reset UI state when WebSocket disconnects
+  const { isConnected } = useWebSocket();
+
   useEffect(() => {
     if (!isConnected) {
       setIsLoading(false);
@@ -167,19 +165,6 @@ export function useChatRealtimeHandlers({
       setPendingPermissionRequests([]);
     }
   }, [isConnected, setIsLoading, setCanAbortSession, setClaudeStatus, setPendingPermissionRequests]);
-
-  // Reset UI state when server restarts (different serverId)
-  useEffect(() => {
-    if (serverId && prevServerIdRef.current && serverId !== prevServerIdRef.current) {
-      setIsLoading(false);
-      setCanAbortSession(false);
-      setClaudeStatus(null);
-      setPendingPermissionRequests([]);
-      setTokenBudget(null);
-      window.refreshProjects?.();
-    }
-    prevServerIdRef.current = serverId;
-  }, [serverId, setIsLoading, setCanAbortSession, setClaudeStatus, setPendingPermissionRequests, setTokenBudget]);
 
   useEffect(() => {
     if (!latestMessage) {
@@ -207,6 +192,7 @@ export function useChatRealtimeHandlers({
       'codex-complete',
       'cursor-result',
       'session-aborted',
+      'session-auto-aborted',
       'claude-error',
       'cursor-error',
       'codex-error',
@@ -845,6 +831,40 @@ export function useChatRealtimeHandlers({
           console.warn('Error handling cursor-output message:', error);
         }
         break;
+
+      // BUG #3 FIX: Handle auto-aborted sessions (background task SDK limitation).
+      // When Claude creates a background task, the server breaks the message loop
+      // because Claude SDK cannot receive completion notifications. We treat this
+      // like a normal completion so the UI doesn't get stuck in loading state.
+      case 'session-auto-aborted': {
+        const pendingSessionId = sessionStorage.getItem('pendingSessionId');
+        const abortedSessionId = latestMessage.sessionId || currentSessionId || pendingSessionId;
+
+        clearLoadingIndicators();
+        markSessionsAsCompleted(
+          abortedSessionId,
+          currentSessionId,
+          selectedSession?.id,
+          pendingSessionId,
+        );
+
+        if (pendingSessionId && !currentSessionId) {
+          setCurrentSessionId(pendingSessionId);
+          sessionStorage.removeItem('pendingSessionId');
+        }
+
+        setPendingPermissionRequests([]);
+
+        setChatMessages((previous) => [
+          ...previous,
+          {
+            type: 'assistant',
+            content: latestMessage.message || 'Session ended: background task created.',
+            timestamp: new Date(),
+          },
+        ]);
+        break;
+      }
 
       case 'claude-complete': {
         const pendingSessionId = sessionStorage.getItem('pendingSessionId');

@@ -8,8 +8,18 @@ type BackgroundTask = {
   input: any;
   sessionId: string | null;
   startTime: number;
-  status: 'running' | 'completed' | 'terminating';
+  status: 'running' | 'monitoring' | 'completed' | 'terminating';
   endTime?: number;
+  agentId?: string;
+  progress?: ProgressMessage[];
+  result?: string;
+};
+
+type ProgressMessage = {
+  type: 'tool_use' | 'text';
+  tool?: string;
+  input?: any;
+  text?: string;
 };
 
 type BashTask = {
@@ -83,6 +93,38 @@ export default function BackgroundTasksPopover({ currentSessionId }: { currentSe
         );
       }
 
+      // Subagent progress: tool calls and text from transcript
+      if (msg.type === 'subagent-progress') {
+        setTasks(prev =>
+          prev.map(task =>
+            task.taskId === msg.taskId
+              ? {
+                  ...task,
+                  agentId: msg.agentId || task.agentId,
+                  progress: [...(task.progress || []), ...msg.messages]
+                }
+              : task
+          )
+        );
+      }
+
+      // Subagent completed: final result from output file
+      if (msg.type === 'subagent-completed') {
+        setTasks(prev =>
+          prev.map(task =>
+            task.taskId === msg.taskId
+              ? {
+                  ...task,
+                  agentId: msg.agentId || task.agentId,
+                  status: 'completed' as const,
+                  endTime: Date.now(),
+                  result: msg.output
+                }
+              : task
+          )
+        );
+      }
+
       if (msg.type === 'bash-started') {
         setBashTasks(prev => [
           ...prev,
@@ -102,6 +144,10 @@ export default function BackgroundTasksPopover({ currentSessionId }: { currentSe
               : bash
           )
         );
+        // Fetch final output once on completion
+        if (msg.bash?.id) {
+          sendMessage({ type: 'query-task-output', taskId: msg.bash.id, maxLines });
+        }
       }
 
       if (msg.type === 'task-output') {
@@ -140,11 +186,11 @@ export default function BackgroundTasksPopover({ currentSessionId }: { currentSe
     ? bashTasks.filter(b => b.sessionId === currentSessionId)
     : bashTasks;
 
-  const runningTasks = sessionTasks.filter(t => t.status === 'running');
+  const activeTasks = sessionTasks.filter(t => t.status === 'running' || t.status === 'monitoring');
   const runningBashTasks = sessionBashTasks.filter(b => b.run_in_background && b.status === 'running');
 
   const handleDeleteTask = (taskId: string, status: string) => {
-    if (status === 'running') {
+    if (status === 'running' || status === 'monitoring') {
       sendMessage({ type: 'kill-task', taskId });
       setTasks(prev => prev.map(task =>
         task.taskId === taskId
@@ -185,7 +231,7 @@ export default function BackgroundTasksPopover({ currentSessionId }: { currentSe
     if (tasks.length > TASKS_MAX) {
       setTasks(prev => {
         const completed = prev.filter(t => t.status === 'completed').sort((a, b) => (a.endTime || 0) - (b.endTime || 0));
-        const running = prev.filter(t => t.status === 'running');
+        const running = prev.filter(t => t.status !== 'completed');
         const toEvict = Math.max(0, prev.length - TASKS_MAX);
         return [...running, ...completed.slice(toEvict)];
       });
@@ -223,9 +269,9 @@ export default function BackgroundTasksPopover({ currentSessionId }: { currentSe
             d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"
           />
         </svg>
-        {(runningTasks.length > 0 || runningBashTasks.length > 0) && (
+        {(activeTasks.length > 0 || runningBashTasks.length > 0) && (
           <span className="absolute -top-1 -right-1 bg-blue-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
-            {runningTasks.length + runningBashTasks.length}
+            {activeTasks.length + runningBashTasks.length}
           </span>
         )}
       </button>
@@ -268,7 +314,7 @@ export default function BackgroundTasksPopover({ currentSessionId }: { currentSe
                   : 'text-muted-foreground hover:text-foreground'
               }`}
             >
-              {t('tabs.subagents')} ({runningTasks.length})
+              {t('tabs.subagents')} ({sessionTasks.length})
             </button>
             <button
               onClick={() => setActiveTab('bash')}
@@ -278,7 +324,7 @@ export default function BackgroundTasksPopover({ currentSessionId }: { currentSe
                   : 'text-muted-foreground hover:text-foreground'
               }`}
             >
-              {t('tabs.bash')} ({runningBashTasks.length})
+              {t('tabs.bash')} ({sessionBashTasks.length})
             </button>
           </div>
 
@@ -323,38 +369,52 @@ export default function BackgroundTasksPopover({ currentSessionId }: { currentSe
   );
 }
 
+/** Extract a short description from Task tool input */
+function getTaskDescription(input: any): string {
+  if (!input) return '';
+  // Task tool has description, prompt fields
+  if (input.description) return input.description;
+  if (input.prompt) {
+    const prompt = String(input.prompt);
+    return prompt.length > 120 ? prompt.slice(0, 120) + '...' : prompt;
+  }
+  return '';
+}
+
 function TaskItem({ task, output, onDelete }: { task: BackgroundTask; output?: TaskOutput; onDelete: (taskId: string, status: string) => void }) {
   const { t } = useTranslation('backgroundTasks');
+  const [expanded, setExpanded] = useState(false);
+
+  const description = getTaskDescription(task.input);
+  const displayId = task.agentId || task.taskId.slice(-8);
+  const isActive = task.status === 'running' || task.status === 'monitoring';
+
+  const statusColor = isActive
+    ? 'bg-blue-500/10 text-blue-500'
+    : task.status === 'terminating'
+    ? 'bg-yellow-500/10 text-yellow-500'
+    : 'bg-green-500/10 text-green-500';
+
+  const statusLabel = task.status === 'monitoring' ? t('status.running') : t(`status.${task.status}`);
 
   return (
     <div className="border border-border rounded-md p-3 bg-background">
-      <div className="flex items-start justify-between mb-2">
-        <div className="flex-1">
+      <div className="flex items-start justify-between mb-1">
+        <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
-            <span className="text-sm font-medium">{task.toolName}</span>
-            <span
-              className={`text-xs px-2 py-0.5 rounded-full ${
-                task.status === 'running'
-                  ? 'bg-blue-500/10 text-blue-500'
-                  : task.status === 'terminating'
-                  ? 'bg-yellow-500/10 text-yellow-500'
-                  : 'bg-green-500/10 text-green-500'
-              }`}
-            >
-              {t(`status.${task.status}`)}
+            <span className="text-xs font-mono text-muted-foreground">{displayId}</span>
+            <span className={`text-xs px-2 py-0.5 rounded-full ${statusColor}`}>
+              {statusLabel}
             </span>
+            {isActive && (
+              <span className="inline-block w-2 h-2 bg-blue-500 rounded-full animate-pulse" />
+            )}
           </div>
-          <p className="text-xs text-muted-foreground mt-1">
-            Task ID: {task.taskId}
-          </p>
-          <p className="text-xs text-muted-foreground mt-1">
-            Started {new Date(task.startTime).toLocaleTimeString()}
-          </p>
         </div>
         <button
           onClick={() => onDelete(task.taskId, task.status)}
           className="p-1 hover:bg-destructive/10 hover:text-destructive rounded transition-colors flex-shrink-0"
-          title={task.status === 'running' ? t('actions.dismiss') : t('actions.remove')}
+          title={isActive ? t('actions.dismiss') : t('actions.remove')}
         >
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -362,7 +422,71 @@ function TaskItem({ task, output, onDelete }: { task: BackgroundTask; output?: T
         </button>
       </div>
 
-      {output && (
+      {/* Description */}
+      {description && (
+        <p className="text-sm text-foreground mt-1 break-words">{description}</p>
+      )}
+
+      <p className="text-xs text-muted-foreground mt-1">
+        {new Date(task.startTime).toLocaleTimeString()}
+        {task.endTime && ` — ${new Date(task.endTime).toLocaleTimeString()}`}
+        {task.endTime && ` (${Math.round((task.endTime - task.startTime) / 1000)}s)`}
+      </p>
+
+      {/* Progress: tool calls */}
+      {task.progress && task.progress.length > 0 && (
+        <div className="mt-2">
+          <button
+            onClick={() => setExpanded(!expanded)}
+            className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1"
+          >
+            <svg
+              className={`w-3 h-3 transition-transform ${expanded ? 'rotate-90' : ''}`}
+              fill="none" stroke="currentColor" viewBox="0 0 24 24"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+            </svg>
+            {task.progress.filter(p => p.type === 'tool_use').length} tool calls
+          </button>
+          {expanded && (
+            <div className="mt-1 space-y-1 max-h-40 overflow-y-auto">
+              {task.progress.map((p, i) => (
+                <div key={i} className="text-xs">
+                  {p.type === 'tool_use' ? (
+                    <div className="flex items-center gap-1 text-muted-foreground">
+                      <span className="text-blue-400 font-mono">{p.tool}</span>
+                      {p.input?.command && (
+                        <span className="text-muted-foreground truncate">
+                          {String(p.input.command).slice(0, 60)}
+                        </span>
+                      )}
+                      {p.input?.pattern && (
+                        <span className="text-muted-foreground truncate">
+                          {String(p.input.pattern).slice(0, 60)}
+                        </span>
+                      )}
+                    </div>
+                  ) : (
+                    <p className="text-muted-foreground truncate">{p.text}</p>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Result */}
+      {task.result && (
+        <div className="mt-2">
+          <pre className="text-xs bg-muted p-2 rounded overflow-x-auto max-h-48 overflow-y-auto whitespace-pre-wrap">
+            {task.result}
+          </pre>
+        </div>
+      )}
+
+      {/* Legacy output from query-task-output */}
+      {!task.result && output && (
         <div className="mt-2">
           <pre className="text-xs bg-muted p-2 rounded overflow-x-auto max-h-32 overflow-y-auto">
             {output.content}
@@ -409,10 +533,7 @@ function BashItem({ bash, output, onDelete }: { bash: BashTask; output?: TaskOut
             <p className="text-xs text-muted-foreground mt-1">{bash.description}</p>
           )}
           <p className="text-xs text-muted-foreground mt-1">
-            Task ID: {bash.id}
-          </p>
-          <p className="text-xs text-muted-foreground mt-1">
-            Started {new Date(bash.startTime).toLocaleTimeString()}
+            {new Date(bash.startTime).toLocaleTimeString()}
           </p>
         </div>
         <button

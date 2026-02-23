@@ -22,10 +22,5 @@
   "output": {
     "label": "输出",
     "showing": "显示最后 {{shown}} / {{total}} 行"
-  },
-  "connection": {
-    "online": "服务器在线",
-    "offline": "服务器离线",
-    "unstable": "服务器连接不稳定"
   }
 }

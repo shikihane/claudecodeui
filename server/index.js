@@ -36,7 +36,6 @@ import { WebSocketServer, WebSocket } from 'ws';
 import os from 'os';
 import http from 'http';
 import cors from 'cors';
-import crypto from 'crypto';
 import { promises as fsPromises } from 'fs';
 import { spawn, exec } from 'child_process';
 import { promisify } from 'util';
@@ -185,10 +184,6 @@ async function killBackgroundProcess(commandText) {
         };
     }
 }
-
-// Generate unique server ID on startup to detect server restarts
-const SERVER_ID = crypto.randomUUID();
-console.log('Server ID:', SERVER_ID);
 
 // File system watchers for provider project/session folders
 const PROVIDER_WATCH_PATHS = [
@@ -1052,12 +1047,6 @@ function handleChatConnection(ws) {
     // Add to connected clients for project updates
     connectedClients.add(ws);
 
-    // Send server info to detect server restarts
-    ws.send(JSON.stringify({
-        type: 'server-info',
-        serverId: SERVER_ID
-    }));
-
     // Wrap WebSocket with writer for consistent interface with SSEStreamWriter
     const writer = new WebSocketWriter(ws);
 
@@ -1164,12 +1153,6 @@ function handleChatConnection(ws) {
                 writer.send({
                     type: 'active-sessions',
                     sessions: activeSessions
-                });
-            } else if (data.type === 'ping') {
-                // Heartbeat: respond to ping with pong
-                writer.send({
-                    type: 'pong',
-                    timestamp: Date.now()
                 });
             } else if (data.type === 'get-pending-permissions') {
                 // Query pending permission requests for a session

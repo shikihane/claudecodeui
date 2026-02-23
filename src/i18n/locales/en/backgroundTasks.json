@@ -22,10 +22,5 @@
   "output": {
     "label": "Output",
     "showing": "Showing last {{shown}} of {{total}} lines"
-  },
-  "connection": {
-    "online": "Server online",
-    "offline": "Server offline",
-    "unstable": "Server connection unstable"
   }
 }
