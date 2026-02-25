@@ -324,11 +324,6 @@ export function useChatSessionState({
 
   useEffect(() => {
     const loadMessages = async () => {
-      // Skip if session ID hasn't changed (prevents unnecessary reloads when selectedSession object reference changes)
-      if (selectedSession?.id && lastLoadedSessionIdRef.current === selectedSession.id) {
-        return;
-      }
-
       if (selectedSession && selectedProject) {
         const provider = (localStorage.getItem('selected-provider') as Provider) || 'claude';
         isLoadingSessionRef.current = true;
@@ -377,6 +372,14 @@ export function useChatSessionState({
               provider,
             });
           }
+        }
+
+        // Skip loading if session ID hasn't changed and we already loaded it
+        if (lastLoadedSessionIdRef.current === selectedSession.id) {
+          setTimeout(() => {
+            isLoadingSessionRef.current = false;
+          }, 250);
+          return;
         }
 
         if (provider === 'cursor') {
@@ -501,10 +504,13 @@ export function useChatSessionState({
   }, [pendingViewSessionRef, selectedSession?.id]);
 
   useEffect(() => {
-    if (sessionMessages.length > 0) {
+    // Only update chatMessages from sessionMessages if:
+    // 1. sessionMessages has content
+    // 2. We're not currently loading (to avoid overwriting user's just-sent message)
+    if (sessionMessages.length > 0 && !isLoading) {
       setChatMessages(convertedMessages);
     }
-  }, [convertedMessages, sessionMessages.length]);
+  }, [convertedMessages, sessionMessages.length, isLoading]);
 
   useEffect(() => {
     if (selectedProject && chatMessages.length > 0) {
