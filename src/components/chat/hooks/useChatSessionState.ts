@@ -504,19 +504,27 @@ export function useChatSessionState({
   }, [pendingViewSessionRef, selectedSession?.id]);
 
   const prevSessionMessagesLengthRef = useRef(0);
+  const isInitialLoadRef = useRef(true);
 
   useEffect(() => {
-    // DISABLED: This useEffect was causing user messages to disappear
-    // Only update chatMessages from sessionMessages during initial load, not during active chat
-    // if (
-    //   sessionMessages.length > 0 &&
-    //   sessionMessages.length !== prevSessionMessagesLengthRef.current &&
-    //   !isLoading
-    // ) {
-    //   setChatMessages(convertedMessages);
-    //   prevSessionMessagesLengthRef.current = sessionMessages.length;
-    // }
-  }, [convertedMessages, sessionMessages.length, isLoading]);
+    // Only sync sessionMessages to chatMessages when:
+    // 1. Not currently loading (to avoid overwriting user's just-sent message)
+    // 2. SessionMessages actually changed
+    // 3. Either it's initial load OR sessionMessages increased (new messages from server)
+    if (
+      sessionMessages.length > 0 &&
+      sessionMessages.length !== prevSessionMessagesLengthRef.current &&
+      !isLoading
+    ) {
+      // Only update if this is initial load or if sessionMessages grew (server added messages)
+      // Don't update if sessionMessages shrunk (user might have just sent a message)
+      if (isInitialLoadRef.current || sessionMessages.length > prevSessionMessagesLengthRef.current) {
+        setChatMessages(convertedMessages);
+        isInitialLoadRef.current = false;
+      }
+      prevSessionMessagesLengthRef.current = sessionMessages.length;
+    }
+  }, [convertedMessages, sessionMessages.length, isLoading, setChatMessages]);
 
   useEffect(() => {
     if (selectedProject && chatMessages.length > 0) {
