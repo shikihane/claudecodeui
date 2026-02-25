@@ -622,14 +622,27 @@ export function useChatRealtimeHandlers({
         break;
 
       case 'claude-permission-request':
+        console.log('[FRONTEND-PERMISSION] Received permission request:', {
+          provider,
+          requestId: latestMessage.requestId,
+          toolName: latestMessage.toolName,
+          hasRequestId: !!latestMessage.requestId
+        });
         if (provider !== 'claude' || !latestMessage.requestId) {
+          console.log('[FRONTEND-PERMISSION] Skipping permission request - provider check failed or no requestId');
           break;
         }
         {
           const requestId = latestMessage.requestId;
 
           setPendingPermissionRequests((previous) => {
-            if (previous.some((request) => request.requestId === requestId)) {
+            const isDuplicate = previous.some((request) => request.requestId === requestId);
+            console.log('[FRONTEND-PERMISSION] Adding to pending requests:', {
+              requestId,
+              isDuplicate,
+              previousCount: previous.length
+            });
+            if (isDuplicate) {
               return previous;
             }
             return [
