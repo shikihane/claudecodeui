@@ -159,9 +159,12 @@ export function useChatRealtimeHandlers({
       setIsLoading(false);
       setCanAbortSession(false);
       setClaudeStatus(null);
-      setPendingPermissionRequests([]);
+      // DO NOT clear pendingPermissionRequests here - they are persisted to localStorage
+      // and should survive WebSocket reconnections. Users may switch tabs or lose connection
+      // while a permission request is pending, and we need to preserve it.
+      // setPendingPermissionRequests([]);
     }
-  }, [isConnected, setIsLoading, setCanAbortSession, setClaudeStatus, setPendingPermissionRequests]);
+  }, [isConnected, setIsLoading, setCanAbortSession, setClaudeStatus]);
 
   // Message handler ref — updated every render so the callback always sees latest
   // closure values (provider, selectedProject, currentSessionId, etc.).
