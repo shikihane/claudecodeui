@@ -73,22 +73,30 @@ export default function AppContent() {
     };
   }, [openSettings]);
 
-  // Permission recovery: query pending permissions on WebSocket connection/reconnection
+  // Permission recovery: query pending permissions on WebSocket connection/reconnection AND session change
   useEffect(() => {
     // Detect connection/reconnection: was disconnected, now connected
-    if (isConnected && !wasConnectedRef.current) {
-      wasConnectedRef.current = true;
+    const isReconnect = isConnected && !wasConnectedRef.current;
 
-      // Query pending permissions for current session
-      if (selectedSession?.id) {
-        console.log('🔄 WebSocket reconnected, querying pending permissions for session:', selectedSession.id);
-        sendMessage({
-          type: 'get-pending-permissions',
-          sessionId: selectedSession.id
-        });
-      }
+    if (isReconnect) {
+      wasConnectedRef.current = true;
     } else if (!isConnected) {
       wasConnectedRef.current = false;
+    }
+
+    // Query pending permissions when:
+    // 1. WebSocket reconnects
+    // 2. Session changes (while connected)
+    if (isConnected && selectedSession?.id) {
+      if (isReconnect) {
+        console.log('🔄 WebSocket reconnected, querying pending permissions for session:', selectedSession.id);
+      } else {
+        console.log('🔄 Session changed, querying pending permissions for session:', selectedSession.id);
+      }
+      sendMessage({
+        type: 'get-pending-permissions',
+        sessionId: selectedSession.id
+      });
     }
   }, [isConnected, selectedSession?.id, sendMessage]);
 

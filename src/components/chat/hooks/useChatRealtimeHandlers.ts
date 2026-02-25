@@ -1163,34 +1163,24 @@ export function useChatRealtimeHandlers({
         if (latestMessage.sessionId && currentSessionId && latestMessage.sessionId !== currentSessionId) {
           break;
         }
-        // Handle permission recovery response from server
+        // Server is the source of truth - always use server data
         const serverRequests = latestMessage.data || [];
+        console.log('[PERMISSION-SYNC] Received pending permissions from server:', {
+          sessionId: latestMessage.sessionId,
+          count: serverRequests.length
+        });
 
-        // Compare with localStorage
+        // Update state with server data
+        setPendingPermissionRequests(serverRequests);
+
+        // Also update localStorage for optimistic UI on next load
+        // (will be overwritten by server query anyway)
         if (currentSessionId) {
           const storageKey = `pending-permissions-${currentSessionId}`;
-          const savedData = localStorage.getItem(storageKey);
-
-          if (savedData) {
-            try {
-              const localRequests = JSON.parse(savedData);
-
-              // If we have local requests but server has none, they're stale
-              if (localRequests.length > 0 && serverRequests.length === 0) {
-                console.warn('⚠️ Pending permission requests are stale (server has none)');
-                localStorage.removeItem(storageKey);
-                setPendingPermissionRequests([]);
-              } else if (serverRequests.length > 0) {
-                // Server has requests, restore them
-                setPendingPermissionRequests(serverRequests);
-              }
-            } catch (error) {
-              console.error('Error parsing saved permission requests:', error);
-              localStorage.removeItem(storageKey);
-            }
-          } else if (serverRequests.length > 0) {
-            // No local data but server has requests, restore them
-            setPendingPermissionRequests(serverRequests);
+          if (serverRequests.length > 0) {
+            localStorage.setItem(storageKey, JSON.stringify(serverRequests));
+          } else {
+            localStorage.removeItem(storageKey);
           }
         }
         break;
