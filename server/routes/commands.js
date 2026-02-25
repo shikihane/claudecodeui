@@ -583,10 +583,12 @@ router.post('/load', async (req, res) => {
     // Security: Prevent path traversal
     const resolvedPath = path.resolve(commandPath);
     if (!resolvedPath.startsWith(path.resolve(os.homedir())) &&
-        !resolvedPath.includes('.claude/commands')) {
+        !resolvedPath.includes('.claude/commands') &&
+        !resolvedPath.includes('.claude/skills') &&
+        !resolvedPath.includes('.claude/plugins')) {
       return res.status(403).json({
         error: 'Access denied',
-        message: 'Command must be in .claude/commands directory'
+        message: 'Command must be in .claude/commands, .claude/skills, or .claude/plugins directory'
       });
     }
 
@@ -661,7 +663,9 @@ router.post('/execute', async (req, res) => {
     // Security: validate commandPath is within allowed directories
     {
       const resolvedPath = path.resolve(commandPath);
-      const userBase = path.resolve(path.join(os.homedir(), '.claude', 'commands'));
+      const userCommandsBase = path.resolve(path.join(os.homedir(), '.claude', 'commands'));
+      const userSkillsBase = path.resolve(path.join(os.homedir(), '.claude', 'skills'));
+      const userPluginsBase = path.resolve(path.join(os.homedir(), '.claude', 'plugins'));
       const projectBase = context?.projectPath
         ? path.resolve(path.join(context.projectPath, '.claude', 'commands'))
         : null;
@@ -669,10 +673,10 @@ router.post('/execute', async (req, res) => {
         const rel = path.relative(base, resolvedPath);
         return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
       };
-      if (!(isUnder(userBase) || (projectBase && isUnder(projectBase)))) {
+      if (!(isUnder(userCommandsBase) || isUnder(userSkillsBase) || isUnder(userPluginsBase) || (projectBase && isUnder(projectBase)))) {
         return res.status(403).json({
           error: 'Access denied',
-          message: 'Command must be in .claude/commands directory'
+          message: 'Command must be in .claude/commands, .claude/skills, or .claude/plugins directory'
         });
       }
     }
