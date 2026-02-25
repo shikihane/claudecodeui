@@ -28,7 +28,6 @@ type LatestChatMessage = {
 };
 
 interface UseChatRealtimeHandlersArgs {
-  latestMessage: LatestChatMessage | null;
   provider: SessionProvider;
   selectedProject: Project | null;
   selectedSession: ProjectSession | null;
@@ -123,7 +122,6 @@ const finalizeStreamingThinking = (setChatMessages: Dispatch<SetStateAction<Chat
 };
 
 export function useChatRealtimeHandlers({
-  latestMessage,
   provider,
   selectedProject,
   selectedSession,
@@ -145,7 +143,6 @@ export function useChatRealtimeHandlers({
   onReplaceTemporarySession,
   onNavigateToSession,
 }: UseChatRealtimeHandlersArgs) {
-  const lastProcessedMessageRef = useRef<LatestChatMessage | null>(null);
   // Refs for streaming thinking blocks
   const thinkingStreamBufferRef = useRef('');
   const thinkingStreamTimerRef = useRef<number | null>(null);
@@ -155,7 +152,7 @@ export function useChatRealtimeHandlers({
   const hasStreamedThinkingRef = useRef(false);
 
   // Reset UI state when WebSocket disconnects
-  const { isConnected } = useWebSocket();
+  const { isConnected, subscribe } = useWebSocket();
 
   useEffect(() => {
     if (!isConnected) {
@@ -166,17 +163,10 @@ export function useChatRealtimeHandlers({
     }
   }, [isConnected, setIsLoading, setCanAbortSession, setClaudeStatus, setPendingPermissionRequests]);
 
-  useEffect(() => {
-    if (!latestMessage) {
-      return;
-    }
-
-    // Guard against duplicate processing when dependency updates occur without a new message object.
-    if (lastProcessedMessageRef.current === latestMessage) {
-      return;
-    }
-    lastProcessedMessageRef.current = latestMessage;
-
+  // Message handler ref — updated every render so the callback always sees latest
+  // closure values (provider, selectedProject, currentSessionId, etc.).
+  const handleMessageRef = useRef<(message: LatestChatMessage) => void>();
+  handleMessageRef.current = (latestMessage: LatestChatMessage) => {
     const messageData = latestMessage.data?.message || latestMessage.data;
     const structuredMessageData =
       messageData && typeof messageData === 'object' ? (messageData as Record<string, any>) : null;
@@ -1193,24 +1183,15 @@ export function useChatRealtimeHandlers({
       default:
         break;
     }
-  }, [
-    latestMessage,
-    provider,
-    selectedProject,
-    selectedSession,
-    currentSessionId,
-    setCurrentSessionId,
-    setChatMessages,
-    setIsLoading,
-    setCanAbortSession,
-    setClaudeStatus,
-    setTokenBudget,
-    setIsSystemSessionChange,
-    setPendingPermissionRequests,
-    onSessionInactive,
-    onSessionProcessing,
-    onSessionNotProcessing,
-    onReplaceTemporarySession,
-    onNavigateToSession,
-  ]);
+  };
+
+  // Subscribe to WebSocket messages via synchronous callback — guaranteed lossless
+  // delivery. Unlike the React state-based `latestMessage` path, the subscribe
+  // callback fires synchronously for every message, bypassing React 18's automatic
+  // batching which can coalesce rapid state updates and skip intermediate values.
+  useEffect(() => {
+    return subscribe((message: any) => {
+      handleMessageRef.current?.(message);
+    });
+  }, [subscribe]);
 }

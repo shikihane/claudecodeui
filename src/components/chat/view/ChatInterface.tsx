@@ -21,7 +21,6 @@ function ChatInterface({
   selectedSession,
   ws,
   sendMessage,
-  latestMessage,
   onFileOpen,
   onInputFocusChange,
   onSessionActive,
@@ -195,7 +194,6 @@ function ChatInterface({
   });
 
   useChatRealtimeHandlers({
-    latestMessage,
     provider,
     selectedProject,
     selectedSession,
@@ -251,6 +249,31 @@ function ChatInterface({
     };
   }, [resetStreamingState]);
 
+  // Loading 时持续保持滚动到底部，防止 Processing 条挡住内容
+  const composerRef = useRef<HTMLDivElement>(null);
+  const scrollIntervalRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (isLoading && !isUserScrolledUp && chatMessages.length > 0) {
+      if (!scrollIntervalRef.current) {
+        scrollIntervalRef.current = window.setInterval(() => {
+          scrollToBottom();
+        }, 100);
+      }
+    } else {
+      if (scrollIntervalRef.current) {
+        clearInterval(scrollIntervalRef.current);
+        scrollIntervalRef.current = null;
+      }
+    }
+
+    return () => {
+      if (scrollIntervalRef.current) {
+        clearInterval(scrollIntervalRef.current);
+        scrollIntervalRef.current = null;
+      }
+    };
+  }, [isLoading, isUserScrolledUp, chatMessages.length, scrollToBottom]);
 
   if (!selectedProject) {
     const selectedProviderLabel =
@@ -321,6 +344,7 @@ function ChatInterface({
           isLoading={isLoading}
         />
 
+        <div ref={composerRef} className="flex-shrink-0">
         <ChatComposer
             pendingPermissionRequests={pendingPermissionRequests}
             handlePermissionDecision={handlePermissionDecision}
@@ -388,6 +412,7 @@ function ChatInterface({
             sendByCtrlEnter={sendByCtrlEnter}
             onTranscript={handleTranscript}
         />
+        </div>
       </div>
 
       <QuickSettingsPanel />

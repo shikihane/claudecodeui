@@ -135,7 +135,6 @@ export default function AppContent() {
           setActiveTab={setActiveTab}
           ws={ws}
           sendMessage={sendMessage}
-          latestMessage={latestMessage}
           isMobile={isMobile}
           onMenuClick={() => setSidebarOpen(true)}
           isLoading={isLoadingProjects}
