@@ -93,6 +93,7 @@ export function useChatSessionState({
   const scrollPositionRef = useRef({ height: 0, top: 0 });
   const loadAllFinishedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loadAllOverlayTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastLoadedSessionIdRef = useRef<string | null>(null);
 
   const createDiff = useMemo<DiffCalculator>(() => createCachedDiffCalculator(), []);
 
@@ -323,6 +324,11 @@ export function useChatSessionState({
 
   useEffect(() => {
     const loadMessages = async () => {
+      // Skip if session ID hasn't changed (prevents unnecessary reloads when selectedSession object reference changes)
+      if (selectedSession?.id && lastLoadedSessionIdRef.current === selectedSession.id) {
+        return;
+      }
+
       if (selectedSession && selectedProject) {
         const provider = (localStorage.getItem('selected-provider') as Provider) || 'claude';
         isLoadingSessionRef.current = true;
@@ -400,6 +406,9 @@ export function useChatSessionState({
             setIsSystemSessionChange(false);
           }
         }
+
+        // Update the last loaded session ID
+        lastLoadedSessionIdRef.current = selectedSession.id;
       } else {
         if (!isSystemSessionChange) {
           resetStreamingState();
@@ -417,6 +426,7 @@ export function useChatSessionState({
         setHasMoreMessages(false);
         setTotalMessages(0);
         setTokenBudget(null);
+        lastLoadedSessionIdRef.current = null;
       }
 
       setTimeout(() => {
@@ -433,7 +443,7 @@ export function useChatSessionState({
     pendingViewSessionRef,
     resetStreamingState,
     selectedProject,
-    selectedSession,
+    selectedSession?.id, // Only depend on session ID, not the entire object
     sendMessage,
     ws,
   ]);
