@@ -1,4 +1,5 @@
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 import { CollapsibleSection } from './CollapsibleSection';
 import type { SubagentChildTool } from '../../types/types';
 
@@ -44,17 +45,19 @@ export const SubagentContainer: React.FC<SubagentContainerProps> = ({
   toolResult,
   subagentState,
 }) => {
+  const { t } = useTranslation('backgroundTasks');
+
   const parsedInput = typeof toolInput === 'string' ? (() => {
     try { return JSON.parse(toolInput); } catch { return {}; }
   })() : (toolInput || {});
 
-  const subagentType = parsedInput?.subagent_type || 'Agent';
-  const description = parsedInput?.description || 'Running task';
+  const subagentType = parsedInput?.subagent_type || t('subagent.defaultType');
+  const description = parsedInput?.description || t('subagent.defaultDescription');
   const prompt = parsedInput?.prompt || '';
   const { childTools, currentToolIndex, isComplete } = subagentState;
   const currentTool = currentToolIndex >= 0 ? childTools[currentToolIndex] : null;
 
-  const title = `Subagent / ${subagentType}: ${description}`;
+  const title = t('subagent.title', { type: subagentType, description });
 
   return (
     <div className="border-l-2 border-l-purple-500 dark:border-l-purple-400 pl-3 py-0.5 my-1">
@@ -74,7 +77,7 @@ export const SubagentContainer: React.FC<SubagentContainerProps> = ({
         {currentTool && !isComplete && (
           <div className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400 mt-1">
             <span className="animate-pulse w-1.5 h-1.5 rounded-full bg-purple-500 dark:bg-purple-400 flex-shrink-0" />
-            <span className="text-gray-400 dark:text-gray-500">Currently:</span>
+            <span className="text-gray-400 dark:text-gray-500">{t('subagent.currently')}</span>
             <span className="font-medium text-gray-600 dark:text-gray-300">{currentTool.toolName}</span>
             {getCompactToolDisplay(currentTool.toolName, currentTool.toolInput) && (
               <>
@@ -93,7 +96,7 @@ export const SubagentContainer: React.FC<SubagentContainerProps> = ({
             <svg className="w-3 h-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
             </svg>
-            <span>Completed ({childTools.length} {childTools.length === 1 ? 'tool' : 'tools'})</span>
+            <span>{t('subagent.completed', { count: childTools.length })}</span>
           </div>
         )}
 
@@ -109,7 +112,7 @@ export const SubagentContainer: React.FC<SubagentContainerProps> = ({
               >
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
               </svg>
-              <span>View tool history ({childTools.length})</span>
+              <span>{t('subagent.viewToolHistory', { count: childTools.length })}</span>
             </summary>
             <div className="mt-1 pl-3 border-l border-gray-200 dark:border-gray-700 space-y-0.5">
               {childTools.map((child, index) => (
@@ -122,7 +125,7 @@ export const SubagentContainer: React.FC<SubagentContainerProps> = ({
                     </span>
                   )}
                   {child.toolResult?.isError && (
-                    <span className="text-red-500 flex-shrink-0">(error)</span>
+                    <span className="text-red-500 flex-shrink-0">{t('subagent.error')}</span>
                   )}
                 </div>
               ))}

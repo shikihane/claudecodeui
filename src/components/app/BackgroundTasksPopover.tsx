@@ -446,7 +446,7 @@ function TaskItem({ task, output, onDelete }: { task: BackgroundTask; output?: T
             >
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
             </svg>
-            {task.progress.filter(p => p.type === 'tool_use').length} tool calls
+            {t('progress.toolCalls', { count: task.progress.filter(p => p.type === 'tool_use').length })}
           </button>
           {expanded && (
             <div className="mt-1 space-y-1 max-h-40 overflow-y-auto">

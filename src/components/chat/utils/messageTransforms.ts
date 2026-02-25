@@ -407,7 +407,18 @@ const classifyUserMessage = (content: string): ClassifiedMessage | null => {
     };
   }
 
-  // 5. Session continuation / interruption / errors
+  // 5. Background task completion results (injected by server after subagent finishes)
+  if (content.startsWith('[Background task completed]')) {
+    const agentMatch = content.match(/Agent\s+(\S+)\s+finished/);
+    const agentId = agentMatch?.[1] || '';
+    const summary = agentId ? `Agent ${agentId} completed` : 'Background task completed';
+    return {
+      injectedType: 'background-task-result',
+      injectedSummary: summary,
+    };
+  }
+
+  // 6. Session continuation / interruption / errors
   if (content.startsWith('Caveat:')) {
     return {
       injectedType: 'continuation',
@@ -506,6 +517,19 @@ export const convertSessionMessages = (rawMessages: any[]): ChatMessage[] => {
             taskStatus: classified.taskStatus || 'completed',
             isSystemInjected: true,
             injectedType: 'task-notification',
+            injectedSummary: classified.injectedSummary,
+          });
+        } else if (classified.injectedType === 'background-task-result') {
+          // Background task result: collapsible card, collapsed by default
+          // Extract the result body after "Result:\n"
+          const resultIdx = content.indexOf('\n\nResult:\n');
+          const resultBody = resultIdx >= 0 ? content.slice(resultIdx + '\n\nResult:\n'.length) : content;
+          converted.push({
+            type: 'assistant',
+            content: resultBody,
+            timestamp: message.timestamp || new Date().toISOString(),
+            isSystemInjected: true,
+            injectedType: 'background-task-result',
             injectedSummary: classified.injectedSummary,
           });
         } else {

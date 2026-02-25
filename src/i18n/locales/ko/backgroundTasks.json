@@ -1,0 +1,43 @@
+{
+  "title": "백그라운드 작업",
+  "tabs": {
+    "subagents": "서브 에이전트",
+    "bash": "Bash"
+  },
+  "empty": {
+    "subagents": "서브 에이전트 작업 없음",
+    "bash": "Bash 명령 없음"
+  },
+  "status": {
+    "running": "실행 중",
+    "completed": "완료",
+    "terminating": "종료 중...",
+    "background": "백그라운드"
+  },
+  "actions": {
+    "dismiss": "작업 종료",
+    "dismissBash": "명령 종료",
+    "remove": "삭제"
+  },
+  "output": {
+    "label": "출력",
+    "showing": "마지막 {{shown}} / {{total}} 줄 표시"
+  },
+  "progress": {
+    "toolCalls": "{{count}}회 도구 호출",
+    "toolCalls_one": "{{count}}회 도구 호출"
+  },
+  "taskId": {
+    "label": "작업 ID"
+  },
+  "subagent": {
+    "defaultType": "에이전트",
+    "defaultDescription": "작업 실행 중",
+    "title": "서브 에이전트 / {{type}}: {{description}}",
+    "currently": "현재:",
+    "completed": "완료 ({{count}}개 도구)",
+    "completed_one": "완료 ({{count}}개 도구)",
+    "viewToolHistory": "도구 기록 보기 ({{count}})",
+    "error": "(오류)"
+  }
+}

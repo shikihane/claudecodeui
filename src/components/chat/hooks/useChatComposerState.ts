@@ -525,26 +525,133 @@ export function useChatComposerState({
         return;
       }
 
-      // Intercept slash commands: if input starts with /commandName, execute as command with args
+      // Intercept slash commands: extract all slash commands from input (space-separated)
       const trimmedInput = currentInput.trim();
-      if (trimmedInput.startsWith('/')) {
-        const firstSpace = trimmedInput.indexOf(' ');
-        const commandName = firstSpace > 0 ? trimmedInput.slice(0, firstSpace) : trimmedInput;
+
+      // Pattern to match slash commands: /command-name (must be preceded by start or space, followed by space or end)
+      const slashCommandPattern = /(^|\s)(\/[a-zA-Z0-9_:-]+)(?=\s|$)/g;
+      const foundCommands: { command: SlashCommand; match: string }[] = [];
+      let match;
+
+      while ((match = slashCommandPattern.exec(trimmedInput)) !== null) {
+        const commandName = match[2]; // The /command-name part
         const matchedCommand = slashCommands.find((cmd: SlashCommand) => cmd.name === commandName);
         if (matchedCommand) {
-          executeCommand(matchedCommand, trimmedInput);
-          setInput('');
-          inputValueRef.current = '';
-          setAttachedImages([]);
-          setUploadingImages(new Map());
-          setImageErrors(new Map());
-          resetCommandMenuState();
-          setIsTextareaExpanded(false);
-          if (textareaRef.current) {
-            textareaRef.current.style.height = 'auto';
-          }
-          return;
+          foundCommands.push({ command: matchedCommand, match: commandName });
         }
+      }
+
+      // If we found any slash commands, load them all first
+      if (foundCommands.length > 0) {
+        // Remove all matched slash commands from the input to get the remaining text
+        let remainingText = trimmedInput;
+        foundCommands.forEach(({ match }) => {
+          remainingText = remainingText.replace(new RegExp(`(^|\\s)${escapeRegExp(match)}(?=\\s|$)`, 'g'), ' ');
+        });
+        remainingText = remainingText.trim();
+
+        // Load all commands/skills sequentially
+        const loadAllCommands = async () => {
+          const skillContents: string[] = [];
+
+          for (const { command } of foundCommands) {
+            try {
+              // Execute command without args to just load it
+              const response = await authenticatedFetch('/api/commands/execute', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                  commandName: command.name,
+                  commandPath: command.path,
+                  args: [],
+                  context: {
+                    projectPath: selectedProject ? (selectedProject.fullPath || selectedProject.path) : undefined,
+                    projectName: selectedProject?.name,
+                    sessionId: currentSessionId,
+                    provider,
+                    model: provider === 'cursor' ? cursorModel : provider === 'codex' ? codexModel : claudeModel,
+                    tokenUsage: tokenBudget,
+                  },
+                }),
+              });
+
+              if (!response.ok) {
+                throw new Error(`Failed to load ${command.name}`);
+              }
+
+              const result = (await response.json()) as CommandExecutionResult;
+
+              // Handle skills: show card and collect content
+              if (result.isSkill && result.content) {
+                setChatMessages((previous) => [
+                  ...previous,
+                  {
+                    type: 'skill-loaded',
+                    content: result.content,
+                    skillName: command.name,
+                    skillDescription: result.metadata?.description || '',
+                    timestamp: Date.now(),
+                  },
+                ]);
+                skillContents.push(result.content);
+              } else if (!result.isSkill) {
+                // Handle regular commands: execute them normally
+                await handleCustomCommand({ ...result, userArgs: remainingText });
+                return; // Exit early for commands
+              }
+            } catch (error) {
+              console.error(`Error loading ${command.name}:`, error);
+              setChatMessages((previous) => [
+                ...previous,
+                {
+                  type: 'assistant',
+                  content: `⚠️ Failed to load ${command.name}`,
+                  timestamp: Date.now(),
+                },
+              ]);
+            }
+          }
+
+          // After all skills are loaded, handle remaining text
+          if (skillContents.length > 0) {
+            const combinedSkillContent = skillContents.join('\n\n---\n\n');
+            pendingSkillContentRef.current = combinedSkillContent;
+
+            if (remainingText) {
+              // Auto-submit with remaining text
+              setInput(remainingText);
+              inputValueRef.current = remainingText;
+
+              setTimeout(() => {
+                if (handleSubmitRef.current) {
+                  handleSubmitRef.current(createFakeSubmitEvent());
+                }
+              }, 100);
+            } else {
+              // No remaining text, just store skill content for next message
+              setInput('');
+              inputValueRef.current = '';
+              if (textareaRef.current) {
+                textareaRef.current.focus();
+              }
+            }
+          }
+        };
+
+        loadAllCommands();
+
+        // Clear UI state
+        setAttachedImages([]);
+        setUploadingImages(new Map());
+        setImageErrors(new Map());
+        resetCommandMenuState();
+        setIsTextareaExpanded(false);
+        if (textareaRef.current) {
+          textareaRef.current.style.height = 'auto';
+        }
+        return;
       }
 
       let messageContent = currentInput;

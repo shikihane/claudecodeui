@@ -217,6 +217,7 @@
   "systemInjected": {
     "system-reminder": "System Reminder",
     "task-notification": "Task Notification",
+    "background-task-result": "Background Task Result",
     "hook": "Hook Output",
     "command": "Command",
     "skill": "Skill",

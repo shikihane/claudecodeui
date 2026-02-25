@@ -217,6 +217,7 @@
   "systemInjected": {
     "system-reminder": "시스템 알림",
     "task-notification": "작업 알림",
+    "background-task-result": "백그라운드 작업 결과",
     "hook": "Hook 출력",
     "command": "명령어",
     "skill": "스킬",

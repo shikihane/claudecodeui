@@ -264,7 +264,7 @@ function TaskItem({
               {t(`status.${task.status}`)}
             </span>
           </div>
-          <p className="text-xs text-muted-foreground mt-1">Task ID: {task.taskId}</p>
+          <p className="text-xs text-muted-foreground mt-1">{t('taskId.label')}: {task.taskId}</p>
         </div>
         <button
           onClick={() => onDelete(task.taskId, task.status)}
@@ -336,7 +336,7 @@ function BashItem({
               </span>
             )}
           </div>
-          <p className="text-xs text-muted-foreground mt-1">Task ID: {bash.id}</p>
+          <p className="text-xs text-muted-foreground mt-1">{t('taskId.label')}: {bash.id}</p>
         </div>
         <button
           onClick={() => onDelete(bash.id, bash.status)}

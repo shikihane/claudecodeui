@@ -97,7 +97,7 @@ const MessageComponent = memo(({ message, index, prevMessage, createDiff, onFile
       ref={messageRef}
       className={`chat-message ${message.type} ${isGrouped ? 'grouped' : ''} ${message.type === 'user' && !message.isSystemInjected ? 'flex justify-end px-3 sm:px-0' : 'px-3 sm:px-0'}`}
     >
-      {message.isSystemInjected && !message.isTaskNotification ? (
+      {message.isSystemInjected && !message.isTaskNotification && message.injectedType !== 'background-task-result' ? (
         /* System-injected message — muted, collapsed by default */
         <div className="w-full">
           <details className="group">
@@ -179,6 +179,35 @@ const MessageComponent = memo(({ message, index, prevMessage, createDiff, onFile
               U
             </div>
           )}
+        </div>
+      ) : message.injectedType === 'background-task-result' ? (
+        /* Background task result — collapsible card, collapsed by default */
+        <div className="w-full">
+          <details className="group border border-emerald-200 dark:border-emerald-800/60 rounded-lg overflow-hidden bg-emerald-50/50 dark:bg-emerald-900/10">
+            <summary className="cursor-pointer flex items-center gap-3 py-2.5 px-3 hover:bg-emerald-100/60 dark:hover:bg-emerald-900/20 transition-colors select-none">
+              <div className="flex items-center justify-center w-6 h-6 bg-emerald-500 dark:bg-emerald-600 rounded-full flex-shrink-0">
+                <svg className="w-3.5 h-3.5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+              </div>
+              <div className="flex-1 min-w-0">
+                <span className="text-sm font-medium text-emerald-900 dark:text-emerald-100">
+                  {message.injectedSummary || t('systemInjected.background-task-result')}
+                </span>
+              </div>
+              <span className="text-[10px] text-emerald-600/70 dark:text-emerald-400/60 flex-shrink-0">
+                {formattedTime}
+              </span>
+              <svg className="w-4 h-4 text-emerald-500 dark:text-emerald-400 transition-transform group-open:rotate-90 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+              </svg>
+            </summary>
+            <div className="border-t border-emerald-200 dark:border-emerald-800/60 bg-white dark:bg-gray-900 p-3">
+              <pre className="text-xs text-gray-700 dark:text-gray-300 whitespace-pre-wrap break-words font-mono max-h-96 overflow-y-auto">
+                {message.content}
+              </pre>
+            </div>
+          </details>
         </div>
       ) : message.isTaskNotification ? (
         /* Compact task notification on the left */
