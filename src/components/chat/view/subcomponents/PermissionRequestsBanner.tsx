@@ -21,20 +21,9 @@ export default function PermissionRequestsBanner({
   handlePermissionDecision,
   handleGrantToolPermission,
 }: PermissionRequestsBannerProps) {
-  console.log('[PERMISSION-BANNER] Render called with:', {
-    requestCount: pendingPermissionRequests.length,
-    requests: pendingPermissionRequests.map(r => ({
-      requestId: r.requestId,
-      toolName: r.toolName
-    }))
-  });
-
   if (!pendingPermissionRequests.length) {
-    console.log('[PERMISSION-BANNER] No pending requests, returning null');
     return null;
   }
-
-  console.log('[PERMISSION-BANNER] Rendering banner with', pendingPermissionRequests.length, 'requests');
 
   return (
     <div className="mb-3 space-y-2">

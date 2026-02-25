@@ -625,14 +625,7 @@ export function useChatRealtimeHandlers({
         break;
 
       case 'claude-permission-request':
-        console.log('[FRONTEND-PERMISSION] Received permission request:', {
-          provider,
-          requestId: latestMessage.requestId,
-          toolName: latestMessage.toolName,
-          hasRequestId: !!latestMessage.requestId
-        });
         if (provider !== 'claude' || !latestMessage.requestId) {
-          console.log('[FRONTEND-PERMISSION] Skipping permission request - provider check failed or no requestId');
           break;
         }
         {
@@ -640,11 +633,6 @@ export function useChatRealtimeHandlers({
 
           setPendingPermissionRequests((previous) => {
             const isDuplicate = previous.some((request) => request.requestId === requestId);
-            console.log('[FRONTEND-PERMISSION] Adding to pending requests:', {
-              requestId,
-              isDuplicate,
-              previousCount: previous.length
-            });
             if (isDuplicate) {
               return previous;
             }
@@ -1165,24 +1153,7 @@ export function useChatRealtimeHandlers({
         }
         // Server is the source of truth - always use server data
         const serverRequests = latestMessage.data || [];
-        console.log('[PERMISSION-SYNC] Received pending permissions from server:', {
-          sessionId: latestMessage.sessionId,
-          count: serverRequests.length
-        });
-
-        // Update state with server data
         setPendingPermissionRequests(serverRequests);
-
-        // Also update localStorage for optimistic UI on next load
-        // (will be overwritten by server query anyway)
-        if (currentSessionId) {
-          const storageKey = `pending-permissions-${currentSessionId}`;
-          if (serverRequests.length > 0) {
-            localStorage.setItem(storageKey, JSON.stringify(serverRequests));
-          } else {
-            localStorage.removeItem(storageKey);
-          }
-        }
         break;
       }
 

@@ -58,38 +58,6 @@ export function useChatProviderState({ selectedSession }: UseChatProviderStateAr
     );
   }, [selectedSession?.id]);
 
-  // Load pending permission requests from localStorage on session change
-  useEffect(() => {
-    if (!selectedSession?.id) return;
-
-    const storageKey = `pending-permissions-${selectedSession.id}`;
-    const saved = localStorage.getItem(storageKey);
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        setPendingPermissionRequests(parsed);
-      } catch (error) {
-        console.error('Error parsing saved permission requests:', error);
-        localStorage.removeItem(storageKey);
-      }
-    } else {
-      // No saved permissions for this session, clear the state
-      setPendingPermissionRequests([]);
-    }
-  }, [selectedSession?.id]);
-
-  // Save pending permission requests to localStorage (runs after load effect)
-  useEffect(() => {
-    if (!selectedSession?.id) return;
-
-    const storageKey = `pending-permissions-${selectedSession.id}`;
-    if (pendingPermissionRequests.length > 0) {
-      localStorage.setItem(storageKey, JSON.stringify(pendingPermissionRequests));
-    } else {
-      localStorage.removeItem(storageKey);
-    }
-  }, [pendingPermissionRequests, selectedSession?.id]);
-
   useEffect(() => {
     if (provider !== 'cursor') {
       return;

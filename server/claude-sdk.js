@@ -526,13 +526,14 @@ function mapCliOptionsToSDK(options = {}) {
  * @param {Array<string>} tempImagePaths - Temp image file paths for cleanup
  * @param {string} tempDir - Temp directory for cleanup
  */
-function addSession(sessionId, queryInstance, tempImagePaths = [], tempDir = null) {
+function addSession(sessionId, queryInstance, tempImagePaths = [], tempDir = null, writer = null) {
   activeSessions.set(sessionId, {
     instance: queryInstance,
     startTime: Date.now(),
     status: 'active',
     tempImagePaths,
-    tempDir
+    tempDir,
+    writer
   });
 }
 
@@ -897,7 +898,7 @@ async function queryClaudeSDK(command, options = {}, ws) {
 
     // Track the query instance for abort capability
     if (capturedSessionId) {
-      addSession(capturedSessionId, queryInstance, tempImagePaths, tempDir);
+      addSession(capturedSessionId, queryInstance, tempImagePaths, tempDir, ws);
     }
 
     // Process streaming messages
@@ -910,7 +911,7 @@ async function queryClaudeSDK(command, options = {}, ws) {
       if (message.session_id && !capturedSessionId) {
 
         capturedSessionId = message.session_id;
-        addSession(capturedSessionId, queryInstance, tempImagePaths, tempDir);
+        addSession(capturedSessionId, queryInstance, tempImagePaths, tempDir, ws);
 
         // Set session ID on writer
         if (ws.setSessionId && typeof ws.setSessionId === 'function') {
@@ -1245,6 +1246,21 @@ function getPendingApprovalsForSession(sessionId) {
   return pending;
 }
 
+/**
+ * Reconnect a session's WebSocketWriter to a new raw WebSocket.
+ * Called when client reconnects (e.g. page refresh) while SDK is still running.
+ * @param {string} sessionId - The session ID
+ * @param {Object} newRawWs - The new raw WebSocket connection
+ * @returns {boolean} True if writer was successfully reconnected
+ */
+function reconnectSessionWriter(sessionId, newRawWs) {
+  const session = getSession(sessionId);
+  if (!session?.writer?.updateWebSocket) return false;
+  session.writer.updateWebSocket(newRawWs);
+  console.log(`[RECONNECT] Writer swapped for session ${sessionId}`);
+  return true;
+}
+
 // Export public API
 export {
   queryClaudeSDK,
@@ -1253,6 +1269,7 @@ export {
   getActiveClaudeSDKSessions,
   resolveToolApproval,
   getPendingApprovalsForSession,
+  reconnectSessionWriter,
   backgroundTasks,
   backgroundTaskOutputs
 };
