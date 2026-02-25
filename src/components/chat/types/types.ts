@@ -49,6 +49,9 @@ export interface ChatMessage {
   isSystemInjected?: boolean;
   injectedType?: 'system-reminder' | 'task-notification' | 'hook' | 'command' | 'skill' | 'continuation' | 'other';
   injectedSummary?: string;
+  // Skill-related fields
+  skillName?: string;
+  skillDescription?: string;
   [key: string]: unknown;
 }
 

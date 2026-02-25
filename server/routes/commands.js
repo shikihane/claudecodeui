@@ -661,6 +661,7 @@ router.post('/execute', async (req, res) => {
 
     // Load command content
     // Security: validate commandPath is within allowed directories
+    let isSkill = false;
     {
       const resolvedPath = path.resolve(commandPath);
       const userCommandsBase = path.resolve(path.join(os.homedir(), '.claude', 'commands'));
@@ -673,10 +674,15 @@ router.post('/execute', async (req, res) => {
         const rel = path.relative(base, resolvedPath);
         return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
       };
+
+      // Check if this is a skill
+      isSkill = isUnder(userSkillsBase) || isUnder(userPluginsBase);
+
       if (!(isUnder(userCommandsBase) || isUnder(userSkillsBase) || isUnder(userPluginsBase) || (projectBase && isUnder(projectBase)))) {
         return res.status(403).json({
           error: 'Access denied',
           message: 'Command must be in .claude/commands, .claude/skills, or .claude/plugins directory'
+        });
         });
       }
     }
@@ -700,6 +706,7 @@ router.post('/execute', async (req, res) => {
       command: commandName,
       content: processedContent,
       metadata,
+      isSkill,
       hasFileIncludes: processedContent.includes('@'),
       hasBashCommands: processedContent.includes('!')
     });

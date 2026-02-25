@@ -71,6 +71,9 @@ interface CommandExecutionResult {
   action?: string;
   data?: any;
   content?: string;
+  command?: string;
+  metadata?: any;
+  isSkill?: boolean;
   hasBashCommands?: boolean;
   hasFileIncludes?: boolean;
 }
@@ -129,6 +132,7 @@ export function useChatComposerState({
     ((event: FormEvent<HTMLFormElement> | MouseEvent | TouchEvent | KeyboardEvent<HTMLTextAreaElement>) => Promise<void>) | null
   >(null);
   const inputValueRef = useRef(input);
+  const pendingSkillContentRef = useRef<string | null>(null);
 
   const handleBuiltInCommand = useCallback(
     (result: CommandExecutionResult) => {
@@ -239,8 +243,35 @@ export function useChatComposerState({
   );
 
   const handleCustomCommand = useCallback(async (result: CommandExecutionResult) => {
-    const { content, hasBashCommands } = result;
+    const { content, hasBashCommands, isSkill, command: commandName, metadata } = result;
 
+    // If this is a skill, store it for the next user message and show a collapsible card
+    if (isSkill) {
+      // Store skill content in a ref to be used with the next user message
+      pendingSkillContentRef.current = content || '';
+
+      // Show a collapsible card for the loaded skill
+      setChatMessages((previous) => [
+        ...previous,
+        {
+          type: 'skill-loaded',
+          content: content || '',
+          skillName: commandName || 'skill',
+          skillDescription: metadata?.description || '',
+          timestamp: Date.now(),
+        },
+      ]);
+
+      // Clear the input and focus the textarea for user to enter their actual prompt
+      setInput('');
+      inputValueRef.current = '';
+      if (textareaRef.current) {
+        textareaRef.current.focus();
+      }
+      return;
+    }
+
+    // For regular commands (not skills), inject content as before
     if (hasBashCommands) {
       const confirmed = window.confirm(
         'This command contains bash commands that will be executed. Do you want to proceed?',
@@ -625,6 +656,12 @@ export function useChatComposerState({
           },
         });
       } else {
+        // Check if there's a pending skill to attach
+        const skillContent = pendingSkillContentRef.current;
+        if (skillContent) {
+          pendingSkillContentRef.current = null; // Clear after using
+        }
+
         sendMessage({
           type: 'claude-command',
           command: messageContent,
@@ -637,6 +674,7 @@ export function useChatComposerState({
             permissionMode,
             model: claudeModel,
             images: uploadedImages,
+            skillContent, // Attach skill content if present
           },
         });
       }
