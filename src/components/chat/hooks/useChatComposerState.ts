@@ -76,6 +76,7 @@ interface CommandExecutionResult {
   isSkill?: boolean;
   hasBashCommands?: boolean;
   hasFileIncludes?: boolean;
+  userArgs?: string; // The user's args text after the skill name
 }
 
 const createFakeSubmitEvent = () => {
@@ -243,30 +244,47 @@ export function useChatComposerState({
   );
 
   const handleCustomCommand = useCallback(async (result: CommandExecutionResult) => {
-    const { content, hasBashCommands, isSkill, command: commandName, metadata } = result;
+    const { content, hasBashCommands, isSkill, command: commandName, metadata, userArgs } = result;
 
-    // If this is a skill, store it for the next user message and show a collapsible card
+    // If this is a skill, show a card and either:
+    // - If user provided args, immediately send args as the prompt with skill attached
+    // - If no args, store skill content for the next user message
     if (isSkill) {
-      // Store skill content in a ref to be used with the next user message
-      pendingSkillContentRef.current = content || '';
+      const skillContent = content || '';
 
       // Show a collapsible card for the loaded skill
       setChatMessages((previous) => [
         ...previous,
         {
           type: 'skill-loaded',
-          content: content || '',
+          content: skillContent,
           skillName: commandName || 'skill',
           skillDescription: metadata?.description || '',
           timestamp: Date.now(),
         },
       ]);
 
-      // Clear the input and focus the textarea for user to enter their actual prompt
-      setInput('');
-      inputValueRef.current = '';
-      if (textareaRef.current) {
-        textareaRef.current.focus();
+      if (userArgs && userArgs.trim()) {
+        // User provided args (e.g., "/skill-name do something") - immediately execute
+        // Store skill content and set input to the user's args, then auto-submit
+        pendingSkillContentRef.current = skillContent;
+        setInput(userArgs.trim());
+        inputValueRef.current = userArgs.trim();
+
+        // Defer submit to next tick so the skill card and input are reflected
+        setTimeout(() => {
+          if (handleSubmitRef.current) {
+            handleSubmitRef.current(createFakeSubmitEvent());
+          }
+        }, 0);
+      } else {
+        // No args - store skill content for the next user message
+        pendingSkillContentRef.current = skillContent;
+        setInput('');
+        inputValueRef.current = '';
+        if (textareaRef.current) {
+          textareaRef.current.focus();
+        }
       }
       return;
     }
@@ -310,8 +328,8 @@ export function useChatComposerState({
       try {
         const effectiveInput = rawInput ?? input;
         const commandMatch = effectiveInput.match(new RegExp(`${escapeRegExp(command.name)}\\s*(.*)`));
-        const args =
-          commandMatch && commandMatch[1] ? commandMatch[1].trim().split(/\s+/) : [];
+        const argsText = commandMatch && commandMatch[1] ? commandMatch[1].trim() : '';
+        const args = argsText ? argsText.split(/\s+/) : [];
 
         const context = {
           projectPath: selectedProject ? (selectedProject.fullPath || selectedProject.path) : undefined,
@@ -352,6 +370,8 @@ export function useChatComposerState({
           setInput('');
           inputValueRef.current = '';
         } else if (result.type === 'custom') {
+          // Pass the raw args text so skills can use it as the user's prompt
+          result.userArgs = argsText;
           await handleCustomCommand(result);
         }
       } catch (error) {
