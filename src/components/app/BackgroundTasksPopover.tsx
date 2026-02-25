@@ -381,6 +381,31 @@ function getTaskDescription(input: any): string {
   return '';
 }
 
+/** Extract a concise display string from a tool's input */
+function getToolInputSummary(tool?: string, input?: any): string {
+  if (!tool || !input) return '';
+  switch (tool) {
+    case 'Bash':
+      return String(input.command || '').slice(0, 60);
+    case 'Read':
+    case 'Write':
+    case 'Edit':
+    case 'ApplyPatch':
+      return input.file_path || '';
+    case 'Grep':
+    case 'Glob':
+      return input.pattern || '';
+    case 'Task':
+      return input.description || input.subagent_type || '';
+    case 'WebFetch':
+      return input.url || '';
+    case 'WebSearch':
+      return input.query || '';
+    default:
+      return '';
+  }
+}
+
 function TaskItem({ task, output, onDelete }: { task: BackgroundTask; output?: TaskOutput; onDelete: (taskId: string, status: string) => void }) {
   const { t } = useTranslation('backgroundTasks');
   const [expanded, setExpanded] = useState(false);
@@ -455,16 +480,9 @@ function TaskItem({ task, output, onDelete }: { task: BackgroundTask; output?: T
                   {p.type === 'tool_use' ? (
                     <div className="flex items-center gap-1 text-muted-foreground">
                       <span className="text-blue-400 font-mono">{p.tool}</span>
-                      {p.input?.command && (
-                        <span className="text-muted-foreground truncate">
-                          {String(p.input.command).slice(0, 60)}
-                        </span>
-                      )}
-                      {p.input?.pattern && (
-                        <span className="text-muted-foreground truncate">
-                          {String(p.input.pattern).slice(0, 60)}
-                        </span>
-                      )}
+                      <span className="text-muted-foreground truncate">
+                        {getToolInputSummary(p.tool, p.input)}
+                      </span>
                     </div>
                   ) : (
                     <p className="text-muted-foreground truncate">{p.text}</p>
