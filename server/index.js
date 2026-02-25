@@ -1105,6 +1105,11 @@ function handleChatConnection(ws) {
                 // Relay UI approval decisions back into the SDK control flow.
                 // This does not persist permissions; it only resolves the in-flight request,
                 // introduced so the SDK can resume once the user clicks Allow/Deny.
+                console.log('[PERMISSION] Received permission response from frontend:', {
+                    requestId: data.requestId,
+                    allow: data.allow,
+                    rememberEntry: data.rememberEntry
+                });
                 if (data.requestId) {
                     resolveToolApproval(data.requestId, {
                         allow: Boolean(data.allow),
@@ -1112,6 +1117,8 @@ function handleChatConnection(ws) {
                         message: data.message,
                         rememberEntry: data.rememberEntry
                     });
+                } else {
+                    console.log('[PERMISSION] ERROR: No requestId in permission response');
                 }
             } else if (data.type === 'cursor-abort') {
                 console.log('[DEBUG] Abort Cursor session:', data.sessionId);

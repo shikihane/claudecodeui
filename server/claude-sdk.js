@@ -393,7 +393,10 @@ function waitForToolApproval(requestId, options = {}) {
 function resolveToolApproval(requestId, decision) {
   const approval = pendingToolApprovals.get(requestId);
   if (approval && approval.resolve) {
+    console.log(`[PERMISSION] Resolving approval for requestId: ${requestId}, decision:`, decision);
     approval.resolve(decision);
+  } else {
+    console.log(`[PERMISSION] No pending approval found for requestId: ${requestId}`);
   }
 }
 
@@ -813,6 +816,8 @@ async function queryClaudeSDK(command, options = {}, ws) {
       }
 
       const requestId = createRequestId();
+      console.log(`[PERMISSION] Sending permission request for ${toolName}, requestId: ${requestId}, sessionId: ${capturedSessionId || sessionId || null}`);
+
       ws.send({
         type: 'claude-permission-request',
         requestId,
@@ -821,6 +826,7 @@ async function queryClaudeSDK(command, options = {}, ws) {
         sessionId: capturedSessionId || sessionId || null
       });
 
+      console.log(`[PERMISSION] Waiting for approval decision for ${toolName}, requestId: ${requestId}`);
       const decision = await waitForToolApproval(requestId, {
         timeoutMs: requiresInteraction ? 0 : undefined,
         signal: context?.signal,
@@ -829,6 +835,7 @@ async function queryClaudeSDK(command, options = {}, ws) {
         sessionId: capturedSessionId || sessionId || null,
         context,
         onCancel: (reason) => {
+          console.log(`[PERMISSION] Permission request cancelled for ${toolName}, requestId: ${requestId}, reason: ${reason}`);
           ws.send({
             type: 'claude-permission-cancelled',
             requestId,
@@ -837,15 +844,21 @@ async function queryClaudeSDK(command, options = {}, ws) {
           });
         }
       });
+
+      console.log(`[PERMISSION] Received decision for ${toolName}, requestId: ${requestId}, decision:`, decision);
+
       if (!decision) {
+        console.log(`[PERMISSION] No decision received (timeout) for ${toolName}, requestId: ${requestId}`);
         return { behavior: 'deny', message: 'Permission request timed out' };
       }
 
       if (decision.cancelled) {
+        console.log(`[PERMISSION] Decision cancelled for ${toolName}, requestId: ${requestId}`);
         return { behavior: 'deny', message: 'Permission request cancelled' };
       }
 
       if (decision.allow) {
+        console.log(`[PERMISSION] Permission allowed for ${toolName}, requestId: ${requestId}`);
         if (decision.rememberEntry && typeof decision.rememberEntry === 'string') {
           if (!sdkOptions.allowedTools.includes(decision.rememberEntry)) {
             sdkOptions.allowedTools.push(decision.rememberEntry);
@@ -857,6 +870,7 @@ async function queryClaudeSDK(command, options = {}, ws) {
         return { behavior: 'allow', updatedInput: decision.updatedInput ?? input };
       }
 
+      console.log(`[PERMISSION] Permission denied for ${toolName}, requestId: ${requestId}`);
       return { behavior: 'deny', message: decision.message ?? 'User denied tool use' };
     };
 
