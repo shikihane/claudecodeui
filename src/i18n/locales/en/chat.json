@@ -213,5 +213,14 @@
   },
   "tasks": {
     "nextTaskPrompt": "Start the next task"
+  },
+  "systemInjected": {
+    "system-reminder": "System Reminder",
+    "task-notification": "Task Notification",
+    "hook": "Hook Output",
+    "command": "Command",
+    "skill": "Skill",
+    "continuation": "Session Info",
+    "other": "System"
   }
 }

@@ -14,6 +14,7 @@ interface TaskListContentProps {
 
 function parseTaskContent(content: string): TaskItem[] {
   const tasks: TaskItem[] = [];
+  if (!content) return tasks;
   const lines = content.split('\n');
 
   for (const line of lines) {
