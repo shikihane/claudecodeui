@@ -503,13 +503,19 @@ export function useChatSessionState({
     }
   }, [pendingViewSessionRef, selectedSession?.id]);
 
+  const prevSessionMessagesLengthRef = useRef(0);
+
   useEffect(() => {
-    // Only update chatMessages from sessionMessages if:
-    // 1. sessionMessages has content
-    // 2. We're not currently loading (to avoid overwriting user's just-sent message)
-    if (sessionMessages.length > 0 && !isLoading) {
-      setChatMessages(convertedMessages);
-    }
+    // DISABLED: This useEffect was causing user messages to disappear
+    // Only update chatMessages from sessionMessages during initial load, not during active chat
+    // if (
+    //   sessionMessages.length > 0 &&
+    //   sessionMessages.length !== prevSessionMessagesLengthRef.current &&
+    //   !isLoading
+    // ) {
+    //   setChatMessages(convertedMessages);
+    //   prevSessionMessagesLengthRef.current = sessionMessages.length;
+    // }
   }, [convertedMessages, sessionMessages.length, isLoading]);
 
   useEffect(() => {
