@@ -683,7 +683,6 @@ router.post('/execute', async (req, res) => {
           error: 'Access denied',
           message: 'Command must be in .claude/commands, .claude/skills, or .claude/plugins directory'
         });
-        });
       }
     }
     const content = await fs.readFile(commandPath, 'utf8');
