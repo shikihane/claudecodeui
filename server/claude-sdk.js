@@ -64,9 +64,7 @@ function getFallbackTasksDir() {
     const drive = process.cwd()[0];
     return path.join(`${drive}:\\tmp`, 'claude', 'tasks');
   }
-  // Use a home-dir location that the CLI never manages.
-  // /tmp/claude/tasks is deleted by each CLI session; ~/.claude/task-outputs persists.
-  return path.join(os.homedir(), '.claude', 'task-outputs');
+  return '/tmp/claude/tasks';
 }
 
 /**
@@ -626,7 +624,7 @@ function mapCliOptionsToSDK(options = {}) {
 
   // Note: if TaskOutput returns "No task found", the output file from the original
   // tool_result may still exist on disk. Use Read or Bash (cat/tail) on the file path directly.
-  const taskOutputFallbackHint = '\n\nIf TaskOutput returns "No task found", try these in order:\n1. Read the file at the path shown in the original tool_result (e.g. /tmp/claude/tasks/<id>.output)\n2. If that path doesn\'t exist, check ~/.claude/task-outputs/<filename> (same filename, persistent fallback)\n3. If neither exists yet, the task is still processing — poll with: bash -c \'for i in 1 2 3 4 5; do f="/tmp/claude/tasks/<id>.output"; [ -f "$f" ] || f="$HOME/.claude/task-outputs/<id>.output"; [ -f "$f" ] && cat "$f" && break; echo "waiting..."; sleep 3; done\'';
+  const taskOutputFallbackHint = '\n\nIf TaskOutput returns "No task found", the output file may still exist at the path shown in the original tool_result. Use the Read tool or Bash (cat/tail/grep) to access it directly.';
 
   // Add skill content to system prompt if provided
   if (options.skillContent) {
