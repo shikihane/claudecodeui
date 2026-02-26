@@ -64,7 +64,9 @@ function getFallbackTasksDir() {
     const drive = process.cwd()[0];
     return path.join(`${drive}:\\tmp`, 'claude', 'tasks');
   }
-  return '/tmp/claude/tasks';
+  // Use a home-dir location that the CLI never manages.
+  // /tmp/claude/tasks is deleted by each CLI session; ~/.claude/task-outputs persists.
+  return path.join(os.homedir(), '.claude', 'task-outputs');
 }
 
 /**
@@ -293,6 +295,11 @@ function monitorBackgroundBash(taskId, outputPath, ws) {
   let stableCount = 0;
   const STABLE_THRESHOLD = 3; // File unchanged for 3 checks (6 seconds) = done
 
+  // Persistent path: CLI never deletes ~/.claude/task-outputs/; survives across sessions.
+  const persistentDir = getFallbackTasksDir();
+  const persistentPath = path.join(persistentDir, path.basename(outputPath));
+  let persistentWritten = false; // Track if we've done the early write
+
   const interval = setInterval(() => {
     try {
       // Try to open fd if we don't have one yet
@@ -314,6 +321,21 @@ function monitorBackgroundBash(taskId, outputPath, ws) {
       } else {
         stableCount = 0;
         lastSize = currentSize;
+      }
+
+      // Early write: as soon as ANY content appears, write to persistent location.
+      // This makes the output available to follow-up sessions before stability is confirmed.
+      if (currentSize > 0 && !persistentWritten) {
+        try {
+          const buf = Buffer.alloc(currentSize);
+          fs.readSync(fd, buf, 0, currentSize, 0);
+          fs.mkdirSync(persistentDir, { recursive: true });
+          fs.writeFileSync(persistentPath, buf.toString('utf-8'), 'utf-8');
+          persistentWritten = true;
+          console.log(`[BASH-MONITOR] Early persistent write for ${taskId} (${currentSize} bytes)`);
+        } catch (e) {
+          console.warn(`[BASH-MONITOR] Early persistent write failed: ${e.message}`);
+        }
       }
 
       if (stableCount >= STABLE_THRESHOLD && currentSize > 0) {
@@ -343,6 +365,16 @@ function monitorBackgroundBash(taskId, outputPath, ws) {
         } finally {
           try { fs.closeSync(fd); } catch (_) {}
           fd = null;
+        }
+
+        // Overwrite persistent fallback with final stable content
+        if (outputContent) {
+          try {
+            fs.mkdirSync(persistentDir, { recursive: true });
+            fs.writeFileSync(persistentPath, outputContent, 'utf-8');
+          } catch (e) {
+            console.warn(`[BASH-MONITOR] Persistent final write failed: ${e.message}`);
+          }
         }
 
         // Write cached content back to disk immediately (secondary safeguard, before CLI cleanup)
@@ -594,7 +626,7 @@ function mapCliOptionsToSDK(options = {}) {
 
   // Note: if TaskOutput returns "No task found", the output file from the original
   // tool_result may still exist on disk. Use Read or Bash (cat/tail) on the file path directly.
-  const taskOutputFallbackHint = '\n\nIf TaskOutput returns "No task found", the output file may still exist at the path shown in the original tool_result. Use the Read tool or Bash (cat/tail/grep) to access it directly.';
+  const taskOutputFallbackHint = '\n\nIf TaskOutput returns "No task found", try these in order:\n1. Read the file at the path shown in the original tool_result (e.g. /tmp/claude/tasks/<id>.output)\n2. If that path doesn\'t exist, check ~/.claude/task-outputs/<filename> (same filename, persistent fallback)\n3. If neither exists yet, the task is still processing — poll with: bash -c \'for i in 1 2 3 4 5; do f="/tmp/claude/tasks/<id>.output"; [ -f "$f" ] || f="$HOME/.claude/task-outputs/<id>.output"; [ -f "$f" ] && cat "$f" && break; echo "waiting..."; sleep 3; done\'';
 
   // Add skill content to system prompt if provided
   if (options.skillContent) {
