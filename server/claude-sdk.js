@@ -179,6 +179,7 @@ function monitorSubagentCompletion(agentId, toolUseId, ws, sessionId, queryOptio
           if (msg.type === 'assistant' && msg.message?.content) {
             for (const block of msg.message.content) {
               if (block.type === 'tool_use') {
+                console.log(`[SUBAGENT-DEBUG] tool_use: name=${block.name}, input keys=${Object.keys(block.input || {})}, input=`, JSON.stringify(block.input).slice(0, 200));
                 progressMessages.push({
                   type: 'tool_use',
                   tool: block.name,
