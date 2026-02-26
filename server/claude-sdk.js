@@ -276,9 +276,28 @@ function monitorBackgroundBash(taskId, outputPath, ws, sessionId, queryOptions) 
           });
         }
 
-        // Inject lightweight notification into main session
+        // Read the output file NOW before it gets cleaned up by CLI
+        let outputContent = '';
+        try {
+          outputContent = fs.readFileSync(outputPath, 'utf-8');
+          // Cache as inline content so query-task-output still works even if file is deleted
+          backgroundTaskOutputs.set(taskId, {
+            type: 'inline',
+            content: outputContent,
+            command: task?.input?.command || ''
+          });
+        } catch (e) {
+          console.warn(`[BASH-MONITOR] Could not read output file: ${e.message}`);
+        }
+
+        // Inject notification with actual output into main session
         if (sessionId && queryOptions) {
-          const injectedPrompt = `[Background bash task completed] Task ${taskId} has finished. Output file: ${outputPath}\nUse the Read tool to check the output if needed.`;
+          const outputSnippet = outputContent
+            ? outputContent.length > 2000
+              ? outputContent.slice(-2000) + '\n... (truncated, showing last 2000 chars)'
+              : outputContent
+            : '(no output captured)';
+          const injectedPrompt = `[Background bash task completed] Task ${taskId} has finished.\n\nOutput:\n${outputSnippet}`;
           console.log(`[BASH-MONITOR] Injecting notification into session ${sessionId}`);
           queryClaudeSDK(injectedPrompt, {
             ...queryOptions,
