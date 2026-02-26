@@ -1109,7 +1109,6 @@ async function queryClaudeSDK(command, options = {}, ws) {
     let messageCount = 0;
     for await (const message of queryInstance) {
       messageCount++;
-      console.log(`[DEBUG] Received message #${messageCount}, type:`, message.type, 'session:', capturedSessionId || 'NEW');
       // Capture session ID from first message
       if (message.session_id && !capturedSessionId) {
 
@@ -1158,7 +1157,6 @@ async function queryClaudeSDK(command, options = {}, ws) {
               // Track background bash commands separately — these won't get bash-completed
               // because CLI returns tool_result immediately while command keeps running
               if (toolInput.run_in_background) {
-                console.log(`[DEBUG] Background Bash task detected: ${toolId}, command:`, toolInput.command);
                 backgroundBashToolIds.add(toolId);
 
                 // Also add to backgroundTasks for kill-task functionality
@@ -1217,18 +1215,14 @@ async function queryClaudeSDK(command, options = {}, ws) {
 
             // Capture output for background bash tasks
             if (backgroundBashToolIds.has(toolUseId)) {
-              console.log(`[DEBUG] tool_result for background Bash task: ${toolUseId}`);
               const rawContent = typeof part.content === 'string' ? part.content
                 : Array.isArray(part.content) ? part.content.map(c => c.text || '').join('')
                 : '';
-
-              console.log(`[DEBUG] rawContent: ${rawContent.substring(0, 200)}`);
 
               // Parse output file path from CLI response like:
               // "Command running in background with ID: xxx. Output is being written to: /path/to/file"
               const outputFileMatch = rawContent.match(/Output is being written to:\s*(\S+)/);
               let outputPath = null;
-              console.log(`[DEBUG] outputFileMatch: ${outputFileMatch ? outputFileMatch[1] : 'null'}`);
               if (outputFileMatch) {
                 // Resolve /tmp/ to Windows path
                 // On Windows with Git Bash, /tmp maps to E:\tmp (or current drive:\tmp)
@@ -1260,12 +1254,8 @@ async function queryClaudeSDK(command, options = {}, ws) {
               }
 
               // Start monitoring background bash output file for completion
-              console.log(`[DEBUG] About to check outputPath: ${outputPath}`);
               if (outputPath) {
-                console.log(`[DEBUG] Calling monitorBackgroundBash for ${toolUseId}`);
                 monitorBackgroundBash(toolUseId, outputPath, ws);
-              } else {
-                console.log(`[DEBUG] No outputPath, skipping monitor for ${toolUseId}`);
               }
             }
 
@@ -1292,8 +1282,6 @@ async function queryClaudeSDK(command, options = {}, ws) {
               const agentIdMatch = rawContent.match(/agentId:\s*(\S+)/);
               if (agentIdMatch && task.input?.run_in_background) {
                 const agentId = agentIdMatch[1];
-                console.log(`[DEBUG] Task subagent launched with agentId: ${agentId}, starting monitor`);
-
                 // Start monitoring the subagent's transcript file
                 // DO NOT mark as completed here - wait for monitor to detect completion
                 monitorSubagentCompletion(agentId, toolUseId, ws);
@@ -1333,12 +1321,9 @@ async function queryClaudeSDK(command, options = {}, ws) {
         }
         // SDK bug workaround: generator may hang after result message.
         // Break out of the loop to prevent infinite blocking.
-        console.log('[DEBUG] Received result message, breaking out of generator loop');
         break;
       }
     }
-
-    console.log(`[DEBUG] Async generator loop completed. Total messages: ${messageCount}, session:`, capturedSessionId || 'NEW');
 
     // Clean up session on completion
     if (capturedSessionId) {
