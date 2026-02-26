@@ -45,6 +45,7 @@ import pty from 'node-pty';
 import fetch from 'node-fetch';
 import mime from 'mime-types';
 
+import { connectedClients, ackEvent, syncPendingEvents } from './ws-clients.js';
 import { getProjects, getSessions, getSessionMessages, renameProject, deleteSession, deleteProject, addProjectManually, extractProjectDirectory, clearProjectDirectoryCache } from './projects.js';
 import { queryClaudeSDK, abortClaudeSDKSession, isClaudeSDKSessionActive, getActiveClaudeSDKSessions, resolveToolApproval, getPendingApprovalsForSession, reconnectSessionWriter, backgroundTasks, backgroundTaskOutputs } from './claude-sdk.js';
 import { spawnCursor, abortCursorSession, isCursorSessionActive, getActiveCursorSessions } from './cursor-cli.js';
@@ -203,7 +204,7 @@ const WATCHER_IGNORED_PATTERNS = [
 const WATCHER_DEBOUNCE_MS = 300;
 let projectsWatchers = [];
 let projectsWatcherDebounceTimer = null;
-const connectedClients = new Set();
+// connectedClients is imported from ws-clients.js (shared with claude-sdk.js monitors)
 let isGetProjectsRunning = false; // Flag to prevent reentrant calls
 
 // Broadcast progress to all connected WebSocket clients
@@ -1235,6 +1236,17 @@ function handleChatConnection(ws) {
                     taskId,
                     output: result
                 });
+            } else if (data.type === 'sync-background-events') {
+                // Client (re)connected and wants all un-ACK'd task events for its session
+                const sessionId = data.sessionId;
+                if (sessionId) {
+                    syncPendingEvents(sessionId, ws);
+                }
+            } else if (data.type === 'ack-event') {
+                // Client confirms receipt of a task event
+                if (data.sessionId && data.eventId) {
+                    ackEvent(data.sessionId, data.eventId);
+                }
             } else if (data.type === 'kill-task') {
                 const taskId = data.taskId;
                 const task = backgroundTasks.get(taskId);

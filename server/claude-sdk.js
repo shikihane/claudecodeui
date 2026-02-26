@@ -16,10 +16,11 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import crypto from 'crypto';
 import { promises as fsPromises } from 'fs';
 import fs from 'fs';
-import { execSync } from 'child_process';
+import { execSync, spawn } from 'child_process';
 import path from 'path';
 import os from 'os';
 import { CLAUDE_MODELS } from '../shared/modelConstants.js';
+import { emitTaskEvent } from './ws-clients.js';
 
 const activeSessions = new Map();
 const pendingToolApprovals = new Map();
@@ -27,6 +28,44 @@ const backgroundTasks = new Map(); // taskId -> task info
 const backgroundTaskOutputs = new Map(); // taskId -> output string
 const BACKGROUND_TASKS_MAX = 100;
 const subagentMonitors = new Map(); // agentId -> interval handle
+
+// Periodically remove task output files older than 3 days to prevent unbounded disk growth.
+const TASK_OUTPUT_TTL_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
+const CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // every hour
+setInterval(async () => {
+  const tasksDir = findClaudeTasksDir();
+  if (!tasksDir) return;
+
+  try {
+    const files = await fsPromises.readdir(tasksDir);
+    const now = Date.now();
+    for (const file of files) {
+      if (!file.endsWith('.output')) continue;
+      const filePath = path.join(tasksDir, file);
+      try {
+        const stat = await fsPromises.stat(filePath);
+        if (now - stat.mtimeMs > TASK_OUTPUT_TTL_MS) {
+          await fsPromises.unlink(filePath);
+          console.log(`[CLEANUP] Removed stale task output: ${file}`);
+        }
+      } catch (e) { /* file may have been removed between readdir and stat */ }
+    }
+  } catch (e) {
+    console.error('[CLEANUP] Error cleaning task outputs:', e.message);
+  }
+}, CLEANUP_INTERVAL_MS).unref(); // unref so this timer doesn't keep the process alive
+
+/**
+ * Returns the fallback tasks directory path for the current platform.
+ * Used when findClaudeTasksDir() returns null (e.g. CLI has cleaned up the dir).
+ */
+function getFallbackTasksDir() {
+  if (process.platform === 'win32') {
+    const drive = process.cwd()[0];
+    return path.join(`${drive}:\\tmp`, 'claude', 'tasks');
+  }
+  return '/tmp/claude/tasks';
+}
 
 /**
  * Find the Claude Code tasks output directory.
@@ -87,14 +126,12 @@ function findTranscriptPath(agentId) {
  * @param {string} agentId - The subagent ID
  * @param {string} toolUseId - The tool_use ID for this Task
  * @param {object} ws - WebSocket connection to send updates
- * @param {string} sessionId - The main session ID for result injection
- * @param {object} queryOptions - Original query options for resume
  */
-function monitorSubagentCompletion(agentId, toolUseId, ws, sessionId, queryOptions) {
+function monitorSubagentCompletion(agentId, toolUseId, ws) {
   const tasksDir = findClaudeTasksDir();
   const outputFile = tasksDir ? path.join(tasksDir, `${agentId}.output`) : null;
 
-  console.log(`[SUBAGENT] Monitor started for ${agentId}, session: ${sessionId}, output file: ${outputFile || 'dir not found'}`);
+  console.log(`[SUBAGENT] Monitor started for ${agentId}, output file: ${outputFile || 'dir not found'}`);
 
   let lastTranscriptLines = 0;
 
@@ -122,41 +159,31 @@ function monitorSubagentCompletion(agentId, toolUseId, ws, sessionId, queryOptio
             agentId
           });
 
-          // Notify frontend: subagent result
-          ws.send({
-            type: 'subagent-completed',
-            agentId,
-            taskId: toolUseId,
-            output: resultText,
-            toolLog
-          });
-
           // Update task status
           const task = backgroundTasks.get(toolUseId);
           if (task) {
             task.status = 'completed';
             task.endTime = Date.now();
             evictOldestCompletedTasks();
+          }
 
-            ws.send({
+          // Notify frontend via at-least-once delivery
+          const taskSessionId = task?.sessionId || null;
+          if (taskSessionId) {
+            emitTaskEvent(taskSessionId, {
+              type: 'subagent-completed',
+              agentId,
+              taskId: toolUseId,
+              output: resultText,
+              toolLog
+            });
+            emitTaskEvent(taskSessionId, {
               type: 'background-task-completed',
-              sessionId: task.sessionId,
               taskId: toolUseId
             });
           }
-
-          // Inject result back into main session by resuming with the output
-          if (sessionId && queryOptions) {
-            const injectedPrompt = `[Background task completed] Agent ${agentId} finished.\n\nResult:\n${resultText}`;
-            console.log(`[SUBAGENT] Injecting result into session ${sessionId}`);
-            queryClaudeSDK(injectedPrompt, {
-              ...queryOptions,
-              sessionId,
-              resume: true
-            }, ws).catch(e => {
-              console.error(`[SUBAGENT] Failed to inject result into session:`, e.message);
-            });
-          }
+          // Output is cached in backgroundTaskOutputs for retrieval via query-task-output.
+          // Do NOT inject as user prompt -- that would create a spurious chat message.
           return;
         }
       }
@@ -226,15 +253,12 @@ const bashMonitors = new Map(); // taskId -> interval handle
 /**
  * Monitors a background bash task's output file for completion.
  * When the file stops growing, the process has exited.
- * Injects a lightweight notification into the main session (not the full output).
  *
  * @param {string} taskId - The tool_use ID
  * @param {string} outputPath - Path to the output file
  * @param {object} ws - WebSocket connection
- * @param {string} sessionId - Main session ID for injection
- * @param {object} queryOptions - Original query options for resume
  */
-function monitorBackgroundBash(taskId, outputPath, ws, sessionId, queryOptions) {
+function monitorBackgroundBash(taskId, outputPath, ws) {
   console.log(`[BASH-MONITOR] Started for ${taskId}, output: ${outputPath}`);
 
   let lastSize = -1;
@@ -261,50 +285,47 @@ function monitorBackgroundBash(taskId, outputPath, ws, sessionId, queryOptions) 
         clearInterval(interval);
         bashMonitors.delete(taskId);
 
-        // Update task status
         const task = backgroundTasks.get(taskId);
-        if (task) {
-          task.status = 'completed';
-          task.endTime = Date.now();
-          evictOldestCompletedTasks();
-
-          ws.send({
-            type: 'bash-completed',
-            sessionId: task.sessionId,
-            bash: { id: taskId, endTime: Date.now() }
-          });
-        }
 
         // Read the output file NOW before it gets cleaned up by CLI
         let outputContent = '';
         try {
           outputContent = fs.readFileSync(outputPath, 'utf-8');
-          // Cache as inline content so query-task-output still works even if file is deleted
+          // Cache as inline content so query-task-output still works even if file is deleted.
+          // filePath is preserved so restoreTaskOutputFiles() can write it back after CLI cleanup.
           backgroundTaskOutputs.set(taskId, {
             type: 'inline',
             content: outputContent,
-            command: task?.input?.command || ''
+            command: task?.input?.command || '',
+            filePath: outputPath
           });
         } catch (e) {
           console.warn(`[BASH-MONITOR] Could not read output file: ${e.message}`);
         }
 
-        // Inject notification with actual output into main session
-        if (sessionId && queryOptions) {
+        // Update task status and notify frontend via at-least-once delivery
+        if (task) {
+          task.status = 'completed';
+          task.endTime = Date.now();
+          evictOldestCompletedTasks();
+
+          const command = task.input?.command || '';
+          // Include full output (capped at 50KB to avoid WS frame overflow)
+          const OUTPUT_CAP = 50000;
           const outputSnippet = outputContent
-            ? outputContent.length > 2000
-              ? outputContent.slice(-2000) + '\n... (truncated, showing last 2000 chars)'
+            ? outputContent.length > OUTPUT_CAP
+              ? outputContent.slice(-OUTPUT_CAP) + `\n... (truncated, showing last ${OUTPUT_CAP} chars)`
               : outputContent
-            : '(no output captured)';
-          const injectedPrompt = `[Background bash task completed] Task ${taskId} has finished.\n\nOutput:\n${outputSnippet}`;
-          console.log(`[BASH-MONITOR] Injecting notification into session ${sessionId}`);
-          queryClaudeSDK(injectedPrompt, {
-            ...queryOptions,
-            sessionId,
-            resume: true
-          }, ws).catch(e => {
-            console.error(`[BASH-MONITOR] Failed to inject notification:`, e.message);
-          });
+            : '';
+
+          if (task.sessionId) {
+            emitTaskEvent(task.sessionId, {
+              type: 'bash-completed',
+              bash: { id: taskId, endTime: Date.now(), command },
+              background: true,
+              outputSnippet
+            });
+          }
         }
       }
     } catch (e) {
@@ -521,9 +542,15 @@ function mapCliOptionsToSDK(options = {}) {
     preset: 'claude_code'  // Required to use CLAUDE.md
   };
 
+  // Note: if TaskOutput returns "No task found", the output file from the original
+  // tool_result may still exist on disk. Use Read or Bash (cat/tail) on the file path directly.
+  const taskOutputFallbackHint = '\n\nIf TaskOutput returns "No task found", the output file may still exist at the path shown in the original tool_result. Use the Read tool or Bash (cat/tail/grep) to access it directly.';
+
   // Add skill content to system prompt if provided
   if (options.skillContent) {
-    sdkOptions.systemPrompt.append = options.skillContent;
+    sdkOptions.systemPrompt.append = options.skillContent + taskOutputFallbackHint;
+  } else {
+    sdkOptions.systemPrompt.append = taskOutputFallbackHint;
   }
 
   // Map setting sources for CLAUDE.md loading
@@ -534,6 +561,18 @@ function mapCliOptionsToSDK(options = {}) {
   if (sessionId) {
     sdkOptions.resume = sessionId;
   }
+
+  // Strip CLAUDECODE from the spawned CLI environment.
+  // PM2 (or any parent Claude Code session) may have CLAUDECODE=1 set, which causes
+  // CLI 2.1.50+ to refuse to start with "Claude Code cannot be launched inside another
+  // Claude Code session." The web server is not itself a Claude Code session, so we
+  // remove it before spawning.
+  sdkOptions.spawnClaudeCodeProcess = ({ command, args, cwd, env, signal }) => {
+    const cleanEnv = { ...env };
+    delete cleanEnv.CLAUDECODE;
+    delete cleanEnv.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC;
+    return spawn(command, args, { cwd, env: cleanEnv, signal });
+  };
 
   return sdkOptions;
 }
@@ -781,6 +820,59 @@ async function loadMcpConfig(cwd) {
   } catch (error) {
     console.error('Error loading MCP config:', error.message);
     return null;
+  }
+}
+
+/**
+ * Restores task output files that were cleaned up by the CLI after session end.
+ *
+ * The Claude CLI writes <tmpdir>/claude/tasks/<id>.output files and then deletes
+ * them when the process exits. We cache the content in backgroundTaskOutputs before
+ * the CLI exits; this function writes the cached content back so the next session
+ * can read it with Read/Bash even if TaskOutput itself can't find the task.
+ */
+async function restoreTaskOutputFiles() {
+  if (backgroundTaskOutputs.size === 0) return;
+
+  let tasksDir = findClaudeTasksDir();
+  const fallbackDir = getFallbackTasksDir();
+
+  // Ensure at least the fallback dir exists if the CLI-created one is gone
+  if (!tasksDir) {
+    try {
+      await fsPromises.mkdir(fallbackDir, { recursive: true });
+      tasksDir = fallbackDir;
+    } catch (e) {
+      console.error('[RESTORE] Failed to create fallback tasks dir:', e.message);
+      return;
+    }
+  }
+
+  for (const [taskId, output] of backgroundTaskOutputs) {
+    if (output.type !== 'inline' || !output.content) continue;
+
+    // Determine the file path to restore to
+    let outputFile;
+    if (output.filePath) {
+      // Background bash task: original path was captured when monitor started
+      outputFile = output.filePath;
+    } else if (output.agentId) {
+      // Subagent task: file is <tasksDir>/<agentId>.output
+      outputFile = path.join(tasksDir, `${output.agentId}.output`);
+    } else {
+      continue; // No file path info — skip
+    }
+
+    // Only restore if the file is gone (future-safe: if CLI stops deleting, skip)
+    if (!fs.existsSync(outputFile)) {
+      try {
+        await fsPromises.mkdir(path.dirname(outputFile), { recursive: true });
+        await fsPromises.writeFile(outputFile, output.content, 'utf-8');
+        console.log(`[RESTORE] Wrote task output to ${outputFile}`);
+      } catch (e) {
+        console.error(`[RESTORE] Failed to write ${outputFile}:`, e.message);
+      }
+    }
   }
 }
 
@@ -1074,7 +1166,7 @@ async function queryClaudeSDK(command, options = {}, ws) {
 
               // Start monitoring background bash output file for completion
               if (outputPath) {
-                monitorBackgroundBash(toolUseId, outputPath, ws, capturedSessionId || sessionId, options);
+                monitorBackgroundBash(toolUseId, outputPath, ws);
               }
             }
 
@@ -1105,7 +1197,7 @@ async function queryClaudeSDK(command, options = {}, ws) {
 
                 // Start monitoring the subagent's transcript file
                 // DO NOT mark as completed here - wait for monitor to detect completion
-                monitorSubagentCompletion(agentId, toolUseId, ws, capturedSessionId, options);
+                monitorSubagentCompletion(agentId, toolUseId, ws);
 
                 // Mark as monitoring, not completed
                 task.status = 'monitoring';
@@ -1157,6 +1249,9 @@ async function queryClaudeSDK(command, options = {}, ws) {
     // Clean up temporary image files
     await cleanupTempFiles(tempImagePaths, tempDir);
 
+    // Restore any task output files the CLI deleted on exit
+    await restoreTaskOutputFiles();
+
     // Send completion event
     console.log('Streaming complete, sending claude-complete event');
     ws.send({
@@ -1177,6 +1272,9 @@ async function queryClaudeSDK(command, options = {}, ws) {
 
     // Clean up temporary image files on error
     await cleanupTempFiles(tempImagePaths, tempDir);
+
+    // Restore any task output files the CLI deleted on exit
+    await restoreTaskOutputFiles();
 
     // Send error to WebSocket
     ws.send({

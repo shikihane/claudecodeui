@@ -150,6 +150,8 @@ export function useChatRealtimeHandlers({
   // Deduplication: track whether text/thinking were already rendered via stream_event
   const hasStreamedTextRef = useRef(false);
   const hasStreamedThinkingRef = useRef(false);
+  // Deduplication for at-least-once task events (by eventId)
+  const seenTaskEventsRef = useRef(new Set<string>());
 
   // Reset UI state when WebSocket disconnects
   const { isConnected, subscribe } = useWebSocket();
@@ -213,7 +215,10 @@ export function useChatRealtimeHandlers({
       selectedSession?.id || currentSessionId || pendingViewSessionRef.current?.sessionId || null;
     const isSystemInitForView =
       systemInitSessionId && (!activeViewSessionId || systemInitSessionId === activeViewSessionId);
-    const shouldBypassSessionFilter = isGlobalMessage || Boolean(isSystemInitForView);
+    const isBackgroundTaskEvent =
+      (latestMessage.type === 'bash-completed' && latestMessage.background) ||
+      latestMessage.type === 'subagent-completed';
+    const shouldBypassSessionFilter = isGlobalMessage || Boolean(isSystemInitForView) || isBackgroundTaskEvent;
     const isUnscopedError =
       !latestMessage.sessionId &&
       pendingViewSessionRef.current &&
@@ -825,6 +830,53 @@ export function useChatRealtimeHandlers({
           console.warn('Error handling cursor-output message:', error);
         }
         break;
+
+      // Background task completion notifications — insert a card into the chat
+      // These use at-least-once delivery (eventId), so deduplicate here.
+      case 'bash-completed': {
+        if (latestMessage.eventId) {
+          if (seenTaskEventsRef.current.has(latestMessage.eventId)) break;
+          seenTaskEventsRef.current.add(latestMessage.eventId);
+        }
+        // Only show chat notification for background bash tasks (not inline ones)
+        if (latestMessage.background && latestMessage.bash?.command) {
+          const command = latestMessage.bash.command;
+          const displayCommand = command.length > 80 ? command.slice(0, 77) + '...' : command;
+          setChatMessages((previous) => [
+            ...previous,
+            {
+              type: 'assistant',
+              content: latestMessage.outputSnippet || command,
+              timestamp: new Date(),
+              isSystemInjected: true,
+              injectedType: 'background-task-result' as const,
+              injectedSummary: `Bash completed: ${displayCommand}`,
+            },
+          ]);
+        }
+        break;
+      }
+
+      case 'subagent-completed': {
+        if (latestMessage.eventId) {
+          if (seenTaskEventsRef.current.has(latestMessage.eventId)) break;
+          seenTaskEventsRef.current.add(latestMessage.eventId);
+        }
+        const agentId = latestMessage.agentId || '';
+        const displayAgent = agentId.length > 12 ? agentId.slice(0, 12) + '...' : agentId;
+        setChatMessages((previous) => [
+          ...previous,
+          {
+            type: 'assistant',
+            content: latestMessage.output || '',
+            timestamp: new Date(),
+            isSystemInjected: true,
+            injectedType: 'background-task-result' as const,
+            injectedSummary: `Agent ${displayAgent} completed`,
+          },
+        ]);
+        break;
+      }
 
       // BUG #3 FIX: Handle auto-aborted sessions (background task SDK limitation).
       // When Claude creates a background task, the server breaks the message loop

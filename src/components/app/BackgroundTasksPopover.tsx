@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useWebSocket } from '../../contexts/WebSocketContext';
 
@@ -47,7 +47,16 @@ export default function BackgroundTasksPopover({ currentSessionId }: { currentSe
   const [tasks, setTasks] = useState<BackgroundTask[]>([]);
   const [bashTasks, setBashTasks] = useState<BashTask[]>([]);
   const [taskOutputs, setTaskOutputs] = useState<Map<string, TaskOutput>>(new Map());
-  const { sendMessage, subscribe } = useWebSocket();
+  const { sendMessage, subscribe, isConnected } = useWebSocket();
+
+  // On WebSocket (re)connect, request all un-ACK'd events for this session
+  const prevConnectedRef = useRef(false);
+  useEffect(() => {
+    if (isConnected && !prevConnectedRef.current && currentSessionId) {
+      sendMessage({ type: 'sync-background-events', sessionId: currentSessionId });
+    }
+    prevConnectedRef.current = isConnected;
+  }, [isConnected, currentSessionId, sendMessage]);
 
   const isMobile = useMemo(() => window.innerWidth < 768, []);
   const maxLines = useMemo(() => isMobile ? 50 : 200, [isMobile]);
@@ -76,9 +85,28 @@ export default function BackgroundTasksPopover({ currentSessionId }: { currentSe
     return () => clearInterval(interval);
   }, [tasks, bashTasks, sendMessage, maxLines, isOpen]);
 
+  // Deduplication set for at-least-once delivered events
+  const seenEventsRef = useRef(new Set<string>());
+
   // Listen for task events - ALWAYS subscribed (not conditional on isOpen)
   useEffect(() => {
     return subscribe((msg: any) => {
+      // At-least-once: ACK receipt and deduplicate
+      if (msg.eventId) {
+        sendMessage({ type: 'ack-event', eventId: msg.eventId, sessionId: msg.sessionId });
+        if (seenEventsRef.current.has(msg.eventId)) return; // already processed
+        seenEventsRef.current.add(msg.eventId);
+        // Cap the set to prevent unbounded growth
+        if (seenEventsRef.current.size > 500) {
+          const iter = seenEventsRef.current.values();
+          for (let i = 0; i < 100; i++) iter.next();
+          // Delete oldest 100 entries
+          const toKeep = new Set<string>();
+          for (const v of iter) toKeep.add(v);
+          seenEventsRef.current = toKeep;
+        }
+      }
+
       if (msg.type === 'background-task-started') {
         setTasks(prev => [...prev, msg.task]);
       }
