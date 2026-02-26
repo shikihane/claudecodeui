@@ -133,62 +133,86 @@ function monitorSubagentCompletion(agentId, toolUseId, ws) {
 
   console.log(`[SUBAGENT] Monitor started for ${agentId}, output file: ${outputFile || 'dir not found'}`);
 
+  let fd = null;        // File descriptor — null until file appears
   let lastTranscriptLines = 0;
 
   const interval = setInterval(() => {
     try {
-      // 1. Check if output file exists (= task completed)
-      if (outputFile && fs.existsSync(outputFile)) {
-        const content = fs.readFileSync(outputFile, 'utf-8');
-        if (content.includes('--- RESULT ---')) {
-          // Extract result after the separator
-          const resultText = content.split('--- RESULT ---')[1]?.trim() || '';
-          const toolLog = content.split('--- RESULT ---')[0]?.trim() || '';
+      // 1. Try to open fd when output file first appears
+      if (outputFile && fd === null) {
+        try {
+          fd = fs.openSync(outputFile, 'r');
+          console.log(`[SUBAGENT] Opened fd for ${agentId}`);
+        } catch (e) { /* file not ready yet */ }
+      }
 
-          console.log(`[SUBAGENT] ${agentId} completed, result length: ${resultText.length}`);
+      // 2. Check completion via fd (works even after path is unlinked by CLI)
+      if (fd !== null) {
+        const stat = fs.fstatSync(fd);
+        if (stat.size > 0) {
+          const buffer = Buffer.alloc(stat.size);
+          fs.readSync(fd, buffer, 0, stat.size, 0);
+          const content = buffer.toString('utf-8');
 
-          clearInterval(interval);
-          subagentMonitors.delete(agentId);
-          transcriptPathCache.delete(agentId);
+          if (content.includes('--- RESULT ---')) {
+            // Extract result after the separator
+            const resultText = content.split('--- RESULT ---')[1]?.trim() || '';
+            const toolLog = content.split('--- RESULT ---')[0]?.trim() || '';
 
-          // Store output
-          backgroundTaskOutputs.set(toolUseId, {
-            type: 'inline',
-            content: resultText,
-            toolLog,
-            agentId
-          });
+            console.log(`[SUBAGENT] ${agentId} completed, result length: ${resultText.length}`);
 
-          // Update task status
-          const task = backgroundTasks.get(toolUseId);
-          if (task) {
-            task.status = 'completed';
-            task.endTime = Date.now();
-            evictOldestCompletedTasks();
-          }
+            clearInterval(interval);
+            subagentMonitors.delete(agentId);
+            transcriptPathCache.delete(agentId);
 
-          // Notify frontend via at-least-once delivery
-          const taskSessionId = task?.sessionId || null;
-          if (taskSessionId) {
-            emitTaskEvent(taskSessionId, {
-              type: 'subagent-completed',
-              agentId,
-              taskId: toolUseId,
-              output: resultText,
-              toolLog
+            // Close fd before caching
+            try { fs.closeSync(fd); } catch (_) {}
+            fd = null;
+
+            // Store output
+            backgroundTaskOutputs.set(toolUseId, {
+              type: 'inline',
+              content: resultText,
+              toolLog,
+              agentId
             });
-            emitTaskEvent(taskSessionId, {
-              type: 'background-task-completed',
-              taskId: toolUseId
+
+            // Write cached content back to disk immediately (secondary safeguard)
+            restoreTaskOutputFiles().catch(e => {
+              console.warn(`[SUBAGENT] restoreTaskOutputFiles failed: ${e.message}`);
             });
+
+            // Update task status
+            const task = backgroundTasks.get(toolUseId);
+            if (task) {
+              task.status = 'completed';
+              task.endTime = Date.now();
+              evictOldestCompletedTasks();
+            }
+
+            // Notify frontend via at-least-once delivery
+            const taskSessionId = task?.sessionId || null;
+            if (taskSessionId) {
+              emitTaskEvent(taskSessionId, {
+                type: 'subagent-completed',
+                agentId,
+                taskId: toolUseId,
+                output: resultText,
+                toolLog
+              });
+              emitTaskEvent(taskSessionId, {
+                type: 'background-task-completed',
+                taskId: toolUseId
+              });
+            }
+            // Output is cached in backgroundTaskOutputs for retrieval via query-task-output.
+            // Do NOT inject as user prompt -- that would create a spurious chat message.
+            return;
           }
-          // Output is cached in backgroundTaskOutputs for retrieval via query-task-output.
-          // Do NOT inject as user prompt -- that would create a spurious chat message.
-          return;
         }
       }
 
-      // 2. Read transcript for progress updates
+      // 3. Read transcript for progress updates
       const transcriptPath = findTranscriptPath(agentId);
       if (!transcriptPath) return;
 
@@ -237,13 +261,16 @@ function monitorSubagentCompletion(agentId, toolUseId, ws) {
 
   subagentMonitors.set(agentId, interval);
 
-  // Safety: stop monitoring after 1 hour
+  // Safety: stop monitoring after 1 hour, close fd
   setTimeout(() => {
     if (subagentMonitors.has(agentId)) {
       console.log(`[SUBAGENT] Monitor timeout for ${agentId}, stopping`);
       clearInterval(interval);
       subagentMonitors.delete(agentId);
       transcriptPathCache.delete(agentId);
+      if (fd !== null) {
+        try { fs.closeSync(fd); } catch (_) {}
+      }
     }
   }, 60 * 60 * 1000);
 }
@@ -261,15 +288,25 @@ const bashMonitors = new Map(); // taskId -> interval handle
 function monitorBackgroundBash(taskId, outputPath, ws) {
   console.log(`[BASH-MONITOR] Started for ${taskId}, output: ${outputPath}`);
 
+  let fd = null;        // File descriptor — null until file appears
   let lastSize = -1;
   let stableCount = 0;
   const STABLE_THRESHOLD = 3; // File unchanged for 3 checks (6 seconds) = done
 
   const interval = setInterval(() => {
     try {
-      if (!fs.existsSync(outputPath)) return;
+      // Try to open fd if we don't have one yet
+      if (fd === null) {
+        try {
+          fd = fs.openSync(outputPath, 'r');
+          console.log(`[BASH-MONITOR] Opened fd for ${taskId}`);
+        } catch (e) {
+          return; // File doesn't exist yet, keep polling
+        }
+      }
 
-      const stat = fs.statSync(outputPath);
+      // Check size via fd (works even after path is unlinked by CLI)
+      const stat = fs.fstatSync(fd);
       const currentSize = stat.size;
 
       if (currentSize === lastSize) {
@@ -287,10 +324,12 @@ function monitorBackgroundBash(taskId, outputPath, ws) {
 
         const task = backgroundTasks.get(taskId);
 
-        // Read the output file NOW before it gets cleaned up by CLI
+        // Read the output via fd (works even after CLI unlinks the path)
         let outputContent = '';
         try {
-          outputContent = fs.readFileSync(outputPath, 'utf-8');
+          const buffer = Buffer.alloc(currentSize);
+          fs.readSync(fd, buffer, 0, currentSize, 0);
+          outputContent = buffer.toString('utf-8');
           // Cache as inline content so query-task-output still works even if file is deleted.
           // filePath is preserved so restoreTaskOutputFiles() can write it back after CLI cleanup.
           backgroundTaskOutputs.set(taskId, {
@@ -300,8 +339,16 @@ function monitorBackgroundBash(taskId, outputPath, ws) {
             filePath: outputPath
           });
         } catch (e) {
-          console.warn(`[BASH-MONITOR] Could not read output file: ${e.message}`);
+          console.warn(`[BASH-MONITOR] Could not read output via fd: ${e.message}`);
+        } finally {
+          try { fs.closeSync(fd); } catch (_) {}
+          fd = null;
         }
+
+        // Write cached content back to disk immediately (secondary safeguard, before CLI cleanup)
+        restoreTaskOutputFiles().catch(e => {
+          console.warn(`[BASH-MONITOR] restoreTaskOutputFiles failed: ${e.message}`);
+        });
 
         // Update task status and notify frontend via at-least-once delivery
         if (task) {
@@ -335,12 +382,15 @@ function monitorBackgroundBash(taskId, outputPath, ws) {
 
   bashMonitors.set(taskId, interval);
 
-  // Safety: stop after 1 hour
+  // Safety: stop after 1 hour, close fd
   setTimeout(() => {
     if (bashMonitors.has(taskId)) {
       console.log(`[BASH-MONITOR] Timeout for ${taskId}, stopping`);
       clearInterval(interval);
       bashMonitors.delete(taskId);
+      if (fd !== null) {
+        try { fs.closeSync(fd); } catch (_) {}
+      }
     }
   }, 60 * 60 * 1000);
 }
