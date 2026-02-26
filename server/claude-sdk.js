@@ -1212,10 +1212,13 @@ async function queryClaudeSDK(command, options = {}, ws) {
                 : Array.isArray(part.content) ? part.content.map(c => c.text || '').join('')
                 : '';
 
+              console.log(`[DEBUG] rawContent: ${rawContent.substring(0, 200)}`);
+
               // Parse output file path from CLI response like:
               // "Command running in background with ID: xxx. Output is being written to: /path/to/file"
               const outputFileMatch = rawContent.match(/Output is being written to:\s*(\S+)/);
               let outputPath = null;
+              console.log(`[DEBUG] outputFileMatch: ${outputFileMatch ? outputFileMatch[1] : 'null'}`);
               if (outputFileMatch) {
                 // Resolve /tmp/ to Windows path
                 // On Windows with Git Bash, /tmp maps to E:\tmp (or current drive:\tmp)
@@ -1247,8 +1250,12 @@ async function queryClaudeSDK(command, options = {}, ws) {
               }
 
               // Start monitoring background bash output file for completion
+              console.log(`[DEBUG] About to check outputPath: ${outputPath}`);
               if (outputPath) {
+                console.log(`[DEBUG] Calling monitorBackgroundBash for ${toolUseId}`);
                 monitorBackgroundBash(toolUseId, outputPath, ws);
+              } else {
+                console.log(`[DEBUG] No outputPath, skipping monitor for ${toolUseId}`);
               }
             }
 
