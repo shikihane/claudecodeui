@@ -642,6 +642,18 @@ function mapCliOptionsToSDK(options = {}) {
     sdkOptions.resume = sessionId;
   }
 
+  // Allow Claude's Read/Bash tools to access task output directories.
+  // The Claude CLI enforces a path whitelist — only cwd and explicitly listed directories
+  // are accessible. Background task output files land in /tmp/claude/tasks/ (Linux) or
+  // <drive>:\tmp\claude\tasks\ (Windows), which is outside cwd and thus blocked by default.
+  {
+    const taskDirsToAllow = new Set();
+    const detected = findClaudeTasksDir();
+    if (detected) taskDirsToAllow.add(detected);
+    taskDirsToAllow.add(getFallbackTasksDir());
+    sdkOptions.additionalDirectories = Array.from(taskDirsToAllow);
+  }
+
   // Strip CLAUDECODE from the spawned CLI environment.
   // PM2 (or any parent Claude Code session) may have CLAUDECODE=1 set, which causes
   // CLI 2.1.50+ to refuse to start with "Claude Code cannot be launched inside another
