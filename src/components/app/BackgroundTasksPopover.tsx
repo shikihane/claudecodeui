@@ -459,7 +459,6 @@ function TaskItem({ task, output, onDelete }: { task: BackgroundTask; output?: T
       </p>
 
       {/* Progress: tool calls */}
-      {task.progress && task.progress.length > 0 && console.log('[POPOVER-DEBUG] progress sample:', task.progress.slice(0, 3).map(p => ({ type: p.type, tool: p.tool, inputKeys: p.input ? Object.keys(p.input) : 'null', input: p.input }))) as unknown as boolean}
       {task.progress && task.progress.length > 0 && (
         <div className="mt-2">
           <button
