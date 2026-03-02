@@ -7,6 +7,7 @@ type WebSocketContextType = {
   sendMessage: (message: any) => void;
   latestMessage: any | null;
   isConnected: boolean;
+  subscribe: (callback: (message: any) => void) => () => void;
 };
 
 const WebSocketContext = createContext<WebSocketContextType | null>(null);
@@ -29,6 +30,7 @@ const buildWebSocketUrl = (token: string | null) => {
 const useWebSocketProviderState = (): WebSocketContextType => {
   const wsRef = useRef<WebSocket | null>(null);
   const unmountedRef = useRef(false); // Track if component is unmounted
+  const subscribersRef = useRef<Set<(message: any) => void>>(new Set());
   const [latestMessage, setLatestMessage] = useState<any>(null);
   const [isConnected, setIsConnected] = useState(false);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -67,6 +69,9 @@ const useWebSocketProviderState = (): WebSocketContextType => {
         try {
           const data = JSON.parse(event.data);
           setLatestMessage(data);
+          for (const cb of subscribersRef.current) {
+            try { cb(data); } catch (e) { console.error('WebSocket subscriber error:', e); }
+          }
         } catch (error) {
           console.error('Error parsing WebSocket message:', error);
         }
@@ -101,13 +106,19 @@ const useWebSocketProviderState = (): WebSocketContextType => {
     }
   }, []);
 
+  const subscribe = useCallback((callback: (message: any) => void) => {
+    subscribersRef.current.add(callback);
+    return () => { subscribersRef.current.delete(callback); };
+  }, []);
+
   const value: WebSocketContextType = useMemo(() =>
   ({
     ws: wsRef.current,
     sendMessage,
     latestMessage,
-    isConnected
-  }), [sendMessage, latestMessage, isConnected]);
+    isConnected,
+    subscribe
+  }), [sendMessage, latestMessage, isConnected, subscribe]);
 
   return value;
 };

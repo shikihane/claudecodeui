@@ -115,6 +115,7 @@ export function useChatRealtimeHandlers({
   onNavigateToSession,
 }: UseChatRealtimeHandlersArgs) {
   const lastProcessedMessageRef = useRef<LatestChatMessage | null>(null);
+  const seenTaskEventsRef = useRef(new Set<string>());
 
   useEffect(() => {
     if (!latestMessage) {
@@ -170,7 +171,10 @@ export function useChatRealtimeHandlers({
       selectedSession?.id || currentSessionId || pendingViewSessionRef.current?.sessionId || null;
     const isSystemInitForView =
       systemInitSessionId && (!activeViewSessionId || systemInitSessionId === activeViewSessionId);
-    const shouldBypassSessionFilter = isGlobalMessage || Boolean(isSystemInitForView);
+    const isBackgroundTaskEvent =
+      (latestMessage.type === 'bash-completed' && latestMessage.background) ||
+      latestMessage.type === 'subagent-completed';
+    const shouldBypassSessionFilter = isGlobalMessage || Boolean(isSystemInitForView) || isBackgroundTaskEvent;
     const isUnscopedError =
       !latestMessage.sessionId &&
       pendingViewSessionRef.current &&
@@ -695,6 +699,50 @@ export function useChatRealtimeHandlers({
           console.warn('Error handling cursor-output message:', error);
         }
         break;
+
+      case 'bash-completed': {
+        if (latestMessage.eventId) {
+          if (seenTaskEventsRef.current.has(latestMessage.eventId)) break;
+          seenTaskEventsRef.current.add(latestMessage.eventId);
+        }
+        if (latestMessage.background && latestMessage.bash?.command) {
+          const command = latestMessage.bash.command;
+          const displayCommand = command.length > 80 ? command.slice(0, 77) + '...' : command;
+          setChatMessages((previous) => [
+            ...previous,
+            {
+              type: 'assistant',
+              content: latestMessage.outputSnippet || command,
+              timestamp: new Date(),
+              isSystemInjected: true,
+              injectedType: 'background-task-result' as const,
+              injectedSummary: `Bash completed: ${displayCommand}`,
+            },
+          ]);
+        }
+        break;
+      }
+
+      case 'subagent-completed': {
+        if (latestMessage.eventId) {
+          if (seenTaskEventsRef.current.has(latestMessage.eventId)) break;
+          seenTaskEventsRef.current.add(latestMessage.eventId);
+        }
+        const agentId = latestMessage.agentId || '';
+        const displayAgent = agentId.length > 12 ? agentId.slice(0, 12) + '...' : agentId;
+        setChatMessages((previous) => [
+          ...previous,
+          {
+            type: 'assistant',
+            content: latestMessage.output || '',
+            timestamp: new Date(),
+            isSystemInjected: true,
+            injectedType: 'background-task-result' as const,
+            injectedSummary: `Agent ${displayAgent} completed`,
+          },
+        ]);
+        break;
+      }
 
       case 'claude-complete': {
         const pendingSessionId = sessionStorage.getItem('pendingSessionId');

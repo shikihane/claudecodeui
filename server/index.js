@@ -39,13 +39,17 @@ import os from 'os';
 import http from 'http';
 import cors from 'cors';
 import { promises as fsPromises } from 'fs';
-import { spawn } from 'child_process';
+import { spawn, exec, execFile } from 'child_process';
+import { promisify } from 'util';
+
+const execAsync = promisify(exec);
 import pty from 'node-pty';
 import fetch from 'node-fetch';
 import mime from 'mime-types';
 
+import { connectedClients, ackEvent, syncPendingEvents } from './ws-clients.js';
 import { getProjects, getSessions, getSessionMessages, renameProject, deleteSession, deleteProject, addProjectManually, extractProjectDirectory, clearProjectDirectoryCache } from './projects.js';
-import { queryClaudeSDK, abortClaudeSDKSession, isClaudeSDKSessionActive, getActiveClaudeSDKSessions, resolveToolApproval } from './claude-sdk.js';
+import { queryClaudeSDK, abortClaudeSDKSession, isClaudeSDKSessionActive, getActiveClaudeSDKSessions, resolveToolApproval, backgroundTasks, backgroundTaskOutputs } from './claude-sdk.js';
 import { spawnCursor, abortCursorSession, isCursorSessionActive, getActiveCursorSessions } from './cursor-cli.js';
 import { queryCodex, abortCodexSession, isCodexSessionActive, getActiveCodexSessions } from './openai-codex.js';
 import { spawnGemini, abortGeminiSession, isGeminiSessionActive, getActiveGeminiSessions } from './gemini-cli.js';
@@ -68,6 +72,70 @@ import { initializeDatabase } from './database/db.js';
 import { validateApiKey, authenticateToken, authenticateWebSocket } from './middleware/auth.js';
 import { IS_PLATFORM } from './constants/config.js';
 
+/**
+ * Truncates output text to a maximum number of lines, keeping the tail.
+ */
+function truncateOutput(output, maxLines) {
+    const lines = output.split('\n');
+    if (lines.length <= maxLines) {
+        return { content: output, truncated: false, totalLines: lines.length };
+    }
+    const truncatedLines = lines.slice(-maxLines);
+    return {
+        content: truncatedLines.join('\n'),
+        truncated: true,
+        totalLines: lines.length,
+        skippedLines: lines.length - maxLines
+    };
+}
+
+/**
+ * Find and kill a background bash process by command text (cross-platform)
+ */
+async function killBackgroundProcess(commandText) {
+    const isWindows = process.platform === 'win32';
+    try {
+        let pids = [];
+        const normalizedCommand = commandText.replace(/['"\\]/g, '').substring(0, 50).trim();
+        if (isWindows) {
+            const { stdout } = await execAsync(
+                `wmic process where "name='bash.exe'" get ProcessId,CommandLine`,
+                { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 }
+            );
+            for (const line of stdout.split('\n')) {
+                const normalizedLine = line.replace(/['"\\]/g, '');
+                if (normalizedLine.includes(normalizedCommand)) {
+                    const pidMatch = line.trim().match(/(\d+)\s*$/);
+                    if (pidMatch) pids.push(parseInt(pidMatch[1]));
+                }
+            }
+            for (const pid of pids) {
+                try { await execAsync(`taskkill /F /PID ${pid}`); } catch (e) {}
+            }
+        } else {
+            try {
+                const { stdout } = await execAsync('ps aux', { encoding: 'utf8' });
+                for (const line of stdout.trim().split('\n')) {
+                    if (line.includes(normalizedCommand)) {
+                        const parts = line.trim().split(/\s+/);
+                        if (parts.length >= 2) pids.push(parseInt(parts[1]));
+                    }
+                }
+                for (const pid of pids) {
+                    try {
+                        await new Promise((resolve, reject) => {
+                            execFile('kill', ['-9', String(pid)], (err) => err ? reject(err) : resolve());
+                        });
+                    } catch (e) {}
+                }
+            } catch (e) {}
+        }
+        return { success: pids.length > 0, pids, error: pids.length === 0 ? 'No matching process found' : undefined };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
 // File system watchers for provider project/session folders
 const PROVIDER_WATCH_PATHS = [
     { provider: 'claude', rootPath: path.join(os.homedir(), '.claude', 'projects') },
@@ -88,7 +156,7 @@ const WATCHER_IGNORED_PATTERNS = [
 const WATCHER_DEBOUNCE_MS = 300;
 let projectsWatchers = [];
 let projectsWatcherDebounceTimer = null;
-const connectedClients = new Set();
+// connectedClients is imported from ws-clients.js (shared with claude-sdk.js monitors)
 let isGetProjectsRunning = false; // Flag to prevent reentrant calls
 
 // Broadcast progress to all connected WebSocket clients
@@ -1054,6 +1122,39 @@ function handleChatConnection(ws) {
                     type: 'active-sessions',
                     sessions: activeSessions
                 });
+            } else if (data.type === 'query-task-output') {
+                const taskId = data.taskId;
+                const maxLines = data.maxLines || 200;
+                const entry = backgroundTaskOutputs.get(taskId);
+                let rawOutput = '';
+                if (entry && entry.type === 'file') {
+                    try { rawOutput = await fsPromises.readFile(entry.path, 'utf-8'); } catch (err) { rawOutput = entry.cliResponse || ''; }
+                } else if (entry && entry.type === 'inline') {
+                    rawOutput = entry.content;
+                }
+                const result = rawOutput ? truncateOutput(rawOutput, maxLines) : { content: '', truncated: false, totalLines: 0 };
+                writer.send({ type: 'task-output', taskId, output: result });
+            } else if (data.type === 'sync-background-events') {
+                const sessionId = data.sessionId;
+                if (sessionId) syncPendingEvents(sessionId, ws);
+            } else if (data.type === 'ack-event') {
+                if (data.sessionId && data.eventId) ackEvent(data.sessionId, data.eventId);
+            } else if (data.type === 'kill-task') {
+                const taskId = data.taskId;
+                const task = backgroundTasks.get(taskId);
+                const entry = backgroundTaskOutputs.get(taskId);
+                if (!task && !entry) {
+                    writer.send({ type: 'task-killed', taskId, success: false, error: 'Task not found' });
+                } else {
+                    const commandText = task?.input?.command || entry?.command || '';
+                    if (!commandText) {
+                        writer.send({ type: 'task-killed', taskId, success: false, error: 'Command text not available' });
+                    } else {
+                        const killResult = await killBackgroundProcess(commandText);
+                        if (task) { task.status = 'completed'; task.endTime = Date.now(); }
+                        writer.send({ type: 'task-killed', taskId, success: killResult.success, pids: killResult.pids, error: killResult.error });
+                    }
+                }
             }
         } catch (error) {
             console.error('[ERROR] Chat WebSocket error:', error.message);

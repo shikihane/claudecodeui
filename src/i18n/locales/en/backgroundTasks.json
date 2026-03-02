@@ -1,0 +1,43 @@
+{
+  "title": "Background Tasks",
+  "tabs": {
+    "subagents": "Subagents",
+    "bash": "Bash"
+  },
+  "empty": {
+    "subagents": "No subagent tasks",
+    "bash": "No bash commands"
+  },
+  "status": {
+    "running": "running",
+    "completed": "completed",
+    "terminating": "terminating...",
+    "background": "background"
+  },
+  "actions": {
+    "dismiss": "Terminate task",
+    "dismissBash": "Terminate command",
+    "remove": "Remove"
+  },
+  "output": {
+    "label": "Output",
+    "showing": "Showing last {{shown}} of {{total}} lines"
+  },
+  "progress": {
+    "toolCalls": "{{count}} tool calls",
+    "toolCalls_one": "{{count}} tool call"
+  },
+  "taskId": {
+    "label": "Task ID"
+  },
+  "subagent": {
+    "defaultType": "Agent",
+    "defaultDescription": "Running task",
+    "title": "Subagent / {{type}}: {{description}}",
+    "currently": "Currently:",
+    "completed": "Completed ({{count}} tools)",
+    "completed_one": "Completed ({{count}} tool)",
+    "viewToolHistory": "View tool history ({{count}})",
+    "error": "(error)"
+  }
+}

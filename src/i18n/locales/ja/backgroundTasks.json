@@ -1,0 +1,43 @@
+{
+  "title": "バックグラウンドタスク",
+  "tabs": {
+    "subagents": "サブエージェント",
+    "bash": "Bash"
+  },
+  "empty": {
+    "subagents": "サブエージェントタスクなし",
+    "bash": "Bashコマンドなし"
+  },
+  "status": {
+    "running": "実行中",
+    "completed": "完了",
+    "terminating": "終了中...",
+    "background": "バックグラウンド"
+  },
+  "actions": {
+    "dismiss": "タスクを終了",
+    "dismissBash": "コマンドを終了",
+    "remove": "削除"
+  },
+  "output": {
+    "label": "出力",
+    "showing": "最後の {{shown}} / {{total}} 行を表示"
+  },
+  "progress": {
+    "toolCalls": "{{count}} 回のツール呼び出し",
+    "toolCalls_one": "{{count}} 回のツール呼び出し"
+  },
+  "taskId": {
+    "label": "タスク ID"
+  },
+  "subagent": {
+    "defaultType": "エージェント",
+    "defaultDescription": "タスク実行中",
+    "title": "サブエージェント / {{type}}: {{description}}",
+    "currently": "現在:",
+    "completed": "完了 ({{count}} ツール)",
+    "completed_one": "完了 ({{count}} ツール)",
+    "viewToolHistory": "ツール履歴を表示 ({{count}})",
+    "error": "(エラー)"
+  }
+}

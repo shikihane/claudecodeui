@@ -14,13 +14,481 @@
 
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import crypto from 'crypto';
-import { promises as fs } from 'fs';
+import { promises as fsPromises } from 'fs';
+import fs from 'fs';
+import { execSync, spawn } from 'child_process';
 import path from 'path';
 import os from 'os';
 import { CLAUDE_MODELS } from '../shared/modelConstants.js';
+import { emitTaskEvent } from './ws-clients.js';
 
 const activeSessions = new Map();
 const pendingToolApprovals = new Map();
+const backgroundTasks = new Map(); // taskId -> task info
+const backgroundTaskOutputs = new Map(); // taskId -> output string
+const BACKGROUND_TASKS_MAX = 100;
+const subagentMonitors = new Map(); // agentId -> interval handle
+
+// Periodically remove task output files older than 3 days to prevent unbounded disk growth.
+const TASK_OUTPUT_TTL_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
+const CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // every hour
+setInterval(async () => {
+  const tasksDir = findClaudeTasksDir();
+  if (!tasksDir) return;
+
+  try {
+    const files = await fsPromises.readdir(tasksDir);
+    const now = Date.now();
+    for (const file of files) {
+      if (!file.endsWith('.output')) continue;
+      const filePath = path.join(tasksDir, file);
+      try {
+        const stat = await fsPromises.stat(filePath);
+        if (now - stat.mtimeMs > TASK_OUTPUT_TTL_MS) {
+          await fsPromises.unlink(filePath);
+        }
+      } catch (e) { /* file may have been removed between readdir and stat */ }
+    }
+  } catch (e) {
+    console.error('[CLEANUP] Error cleaning task outputs:', e.message);
+  }
+}, CLEANUP_INTERVAL_MS).unref(); // unref so this timer doesn't keep the process alive
+
+/**
+ * Returns the fallback tasks directory path for the current platform.
+ * Used when findClaudeTasksDir() returns null (e.g. CLI has cleaned up the dir).
+ */
+function getFallbackTasksDir() {
+  if (process.platform === 'win32') {
+    const drive = process.cwd()[0];
+    return path.join(`${drive}:\\tmp`, 'claude', 'tasks');
+  }
+  return '/tmp/claude/tasks';
+}
+
+/**
+ * Find the Claude Code tasks output directory.
+ * Claude CLI writes output files to <tmpdir>/claude/tasks/<agentId>.output
+ * The tmpdir varies by platform and environment.
+ */
+function findClaudeTasksDir() {
+  const candidates = [
+    // Windows: Claude CLI often uses /tmp which maps to <drive>:\tmp in Git Bash
+    ...(/^[A-Z]:/i.test(process.cwd()) ? [`${process.cwd().slice(0, 2)}/tmp/claude/tasks`] : []),
+    '/tmp/claude/tasks',
+    path.join(os.tmpdir(), 'claude', 'tasks'),
+  ];
+  for (const dir of candidates) {
+    if (fs.existsSync(dir)) return dir;
+  }
+  return null;
+}
+
+/**
+ * Find the subagent transcript file (agent-<agentId>.jsonl) in ~/.claude/projects/.
+ * Caches the result to avoid repeated filesystem searches.
+ */
+const transcriptPathCache = new Map();
+function findTranscriptPath(agentId) {
+  if (transcriptPathCache.has(agentId)) return transcriptPathCache.get(agentId);
+
+  const projectsDir = path.join(os.homedir(), '.claude', 'projects');
+  const filename = `agent-${agentId}.jsonl`;
+
+  try {
+    // First, try a fast targeted search in session subagent directories
+    // Transcripts are typically at {project}/{sessionId}/subagents/agent-{agentId}.jsonl
+    if (fs.existsSync(projectsDir)) {
+      const projectDirs = fs.readdirSync(projectsDir).filter(d => {
+        try { return fs.statSync(path.join(projectsDir, d)).isDirectory(); } catch { return false; }
+      });
+      for (const projDir of projectDirs) {
+        const projPath = path.join(projectsDir, projDir);
+        const sessionDirs = fs.readdirSync(projPath).filter(d => {
+          try { return fs.statSync(path.join(projPath, d)).isDirectory(); } catch { return false; }
+        });
+        for (const sessionDir of sessionDirs) {
+          const subagentPath = path.join(projPath, sessionDir, 'subagents', filename);
+          if (fs.existsSync(subagentPath)) {
+            transcriptPathCache.set(agentId, subagentPath);
+            return subagentPath;
+          }
+        }
+        // Also check directly in project root (original location)
+        const directPath = path.join(projPath, filename);
+        if (fs.existsSync(directPath)) {
+          transcriptPathCache.set(agentId, directPath);
+          return directPath;
+        }
+      }
+    }
+
+    // Fallback: broad recursive search
+    const findCmd = process.platform === 'win32'
+      ? `powershell -Command "Get-ChildItem -Path '${projectsDir}' -Recurse -Filter '${filename}' | Select-Object -First 1 -ExpandProperty FullName"`
+      : `find "${projectsDir}" -name "${filename}" -type f | head -1`;
+
+    const result = execSync(findCmd, { encoding: 'utf-8', timeout: 5000 }).trim();
+    if (result && fs.existsSync(result)) {
+      transcriptPathCache.set(agentId, result);
+      return result;
+    }
+  } catch (e) { /* not found yet */ }
+  return null;
+}
+
+/**
+ * Monitors a subagent for completion by checking the output file.
+ *
+ * Completion detection: Claude CLI writes <tmpdir>/claude/tasks/<agentId>.output
+ * when a subagent finishes. The file contains tool call logs followed by
+ * "--- RESULT ---" and the final output text.
+ *
+ * Progress tracking: The transcript file (agent-<agentId>.jsonl) in
+ * ~/.claude/projects/<project>/ is read for intermediate progress.
+ *
+ * @param {string} agentId - The subagent ID
+ * @param {string} toolUseId - The tool_use ID for this Task
+ * @param {object} ws - WebSocket connection to send updates
+ */
+function monitorSubagentCompletion(agentId, toolUseId, ws) {
+  const tasksDir = findClaudeTasksDir();
+  const outputFile = tasksDir ? path.join(tasksDir, `${agentId}.output`) : null;
+
+  let fd = null;        // File descriptor — null until file appears
+  let lastTranscriptLines = 0;
+
+  const interval = setInterval(() => {
+    try {
+      // 1. Try to open fd when output file first appears
+      if (outputFile && fd === null) {
+        try {
+          fd = fs.openSync(outputFile, 'r');
+        } catch (e) { /* file not ready yet */ }
+      }
+
+      // 2. Check completion via fd (works even after path is unlinked by CLI)
+      if (fd !== null) {
+        const stat = fs.fstatSync(fd);
+        if (stat.size > 0) {
+          const buffer = Buffer.alloc(stat.size);
+          fs.readSync(fd, buffer, 0, stat.size, 0);
+          const content = buffer.toString('utf-8');
+
+          if (content.includes('--- RESULT ---')) {
+            // Extract result after the separator
+            const resultText = content.split('--- RESULT ---')[1]?.trim() || '';
+            const toolLog = content.split('--- RESULT ---')[0]?.trim() || '';
+
+            clearInterval(interval);
+            subagentMonitors.delete(agentId);
+            transcriptPathCache.delete(agentId);
+
+            // Close fd before caching
+            try { fs.closeSync(fd); } catch (_) {}
+            fd = null;
+
+            // Store output
+            backgroundTaskOutputs.set(toolUseId, {
+              type: 'inline',
+              content: resultText,
+              toolLog,
+              agentId
+            });
+
+            // Write cached content back to disk immediately (secondary safeguard)
+            restoreTaskOutputFiles().catch(e => {
+              console.warn(`[SUBAGENT] restoreTaskOutputFiles failed: ${e.message}`);
+            });
+
+            // Update task status
+            const task = backgroundTasks.get(toolUseId);
+            if (task) {
+              task.status = 'completed';
+              task.endTime = Date.now();
+              evictOldestCompletedTasks();
+            }
+
+            // Notify frontend via at-least-once delivery
+            const taskSessionId = task?.sessionId || null;
+            if (taskSessionId) {
+              emitTaskEvent(taskSessionId, {
+                type: 'subagent-completed',
+                agentId,
+                taskId: toolUseId,
+                output: resultText,
+                toolLog
+              });
+              emitTaskEvent(taskSessionId, {
+                type: 'background-task-completed',
+                taskId: toolUseId
+              });
+            }
+            // Output is cached in backgroundTaskOutputs for retrieval via query-task-output.
+            return;
+          }
+        }
+      }
+
+      // 3. Read transcript for progress updates
+      const transcriptPath = findTranscriptPath(agentId);
+      if (!transcriptPath) return;
+
+      const lines = fs.readFileSync(transcriptPath, 'utf-8').split('\n').filter(Boolean);
+      if (lines.length <= lastTranscriptLines) return; // no new lines
+
+      // Send new lines as progress
+      const newLines = lines.slice(lastTranscriptLines);
+      lastTranscriptLines = lines.length;
+
+      const progressMessages = [];
+      for (const line of newLines) {
+        try {
+          const msg = JSON.parse(line);
+
+          // Fallback completion detection via transcript (when output file was cleaned up)
+          if (msg.type === 'result') {
+            const resultText = typeof msg.result === 'string' ? msg.result
+              : (msg.subResult || msg.message?.content || '');
+
+            clearInterval(interval);
+            subagentMonitors.delete(agentId);
+            transcriptPathCache.delete(agentId);
+            if (fd !== null) {
+              try { fs.closeSync(fd); } catch (_) {}
+              fd = null;
+            }
+
+            backgroundTaskOutputs.set(toolUseId, {
+              type: 'inline',
+              content: String(resultText),
+              agentId
+            });
+
+            const task = backgroundTasks.get(toolUseId);
+            if (task) {
+              task.status = 'completed';
+              task.endTime = Date.now();
+              evictOldestCompletedTasks();
+            }
+
+            const taskSessionId = task?.sessionId || null;
+            if (taskSessionId) {
+              emitTaskEvent(taskSessionId, {
+                type: 'subagent-completed',
+                agentId,
+                taskId: toolUseId,
+                output: String(resultText)
+              });
+              emitTaskEvent(taskSessionId, {
+                type: 'background-task-completed',
+                taskId: toolUseId
+              });
+            }
+            return;
+          }
+
+          if (msg.type === 'assistant' && msg.message?.content) {
+            for (const block of msg.message.content) {
+              if (block.type === 'tool_use') {
+                progressMessages.push({
+                  type: 'tool_use',
+                  tool: block.name,
+                  input: block.input
+                });
+              } else if (block.type === 'text' && block.text) {
+                progressMessages.push({
+                  type: 'text',
+                  text: block.text.slice(0, 500)
+                });
+              }
+            }
+          }
+        } catch (e) { /* skip unparseable lines */ }
+      }
+
+      if (progressMessages.length > 0) {
+        ws.send({
+          type: 'subagent-progress',
+          agentId,
+          taskId: toolUseId,
+          messages: progressMessages
+        });
+      }
+    } catch (e) {
+      console.error(`[SUBAGENT] Error monitoring ${agentId}:`, e.message);
+    }
+  }, 2000); // Poll every 2 seconds
+
+  subagentMonitors.set(agentId, interval);
+
+  // Safety: stop monitoring after 1 hour, close fd
+  setTimeout(() => {
+    if (subagentMonitors.has(agentId)) {
+      clearInterval(interval);
+      subagentMonitors.delete(agentId);
+      transcriptPathCache.delete(agentId);
+      if (fd !== null) {
+        try { fs.closeSync(fd); } catch (_) {}
+      }
+    }
+  }, 60 * 60 * 1000);
+}
+
+const bashMonitors = new Map(); // taskId -> interval handle
+
+/**
+ * Monitors a background bash task's output file for completion.
+ * When the file stops growing, the process has exited.
+ *
+ * @param {string} taskId - The tool_use ID
+ * @param {string} outputPath - Path to the output file
+ * @param {object} ws - WebSocket connection
+ */
+function monitorBackgroundBash(taskId, outputPath, ws) {
+  let fd = null;        // File descriptor — null until file appears
+  let lastSize = -1;
+  let stableCount = 0;
+  const STABLE_THRESHOLD = 3; // File unchanged for 3 checks (6 seconds) = done
+
+  // Persistent path: CLI never deletes ~/.claude/task-outputs/; survives across sessions.
+  const persistentDir = getFallbackTasksDir();
+  const persistentPath = path.join(persistentDir, path.basename(outputPath));
+  let persistentWritten = false; // Track if we've done the early write
+
+  const interval = setInterval(() => {
+    try {
+      // Try to open fd if we don't have one yet
+      if (fd === null) {
+        try {
+          fd = fs.openSync(outputPath, 'r');
+        } catch (e) {
+          return; // File doesn't exist yet, keep polling
+        }
+      }
+
+      // Check size via fd (works even after path is unlinked by CLI)
+      const stat = fs.fstatSync(fd);
+      const currentSize = stat.size;
+
+      if (currentSize === lastSize) {
+        stableCount++;
+      } else {
+        stableCount = 0;
+        lastSize = currentSize;
+      }
+
+      // Early write: as soon as ANY content appears, write to persistent location.
+      if (currentSize > 0 && !persistentWritten) {
+        try {
+          const buf = Buffer.alloc(currentSize);
+          fs.readSync(fd, buf, 0, currentSize, 0);
+          fs.mkdirSync(persistentDir, { recursive: true });
+          fs.writeFileSync(persistentPath, buf.toString('utf-8'), 'utf-8');
+          persistentWritten = true;
+        } catch (e) {
+          console.warn(`[BASH-MONITOR] Early persistent write failed: ${e.message}`);
+        }
+      }
+
+      if (stableCount >= STABLE_THRESHOLD && currentSize > 0) {
+        clearInterval(interval);
+        bashMonitors.delete(taskId);
+
+        const task = backgroundTasks.get(taskId);
+
+        // Read the output via fd (works even after CLI unlinks the path)
+        let outputContent = '';
+        try {
+          const buffer = Buffer.alloc(currentSize);
+          fs.readSync(fd, buffer, 0, currentSize, 0);
+          outputContent = buffer.toString('utf-8');
+          backgroundTaskOutputs.set(taskId, {
+            type: 'inline',
+            content: outputContent,
+            command: task?.input?.command || '',
+            filePath: outputPath
+          });
+        } catch (e) {
+          console.warn(`[BASH-MONITOR] Could not read output via fd: ${e.message}`);
+        } finally {
+          try { fs.closeSync(fd); } catch (_) {}
+          fd = null;
+        }
+
+        // Overwrite persistent fallback with final stable content
+        if (outputContent) {
+          try {
+            fs.mkdirSync(persistentDir, { recursive: true });
+            fs.writeFileSync(persistentPath, outputContent, 'utf-8');
+          } catch (e) {
+            console.warn(`[BASH-MONITOR] Persistent final write failed: ${e.message}`);
+          }
+        }
+
+        // Write cached content back to disk immediately
+        restoreTaskOutputFiles().catch(e => {
+          console.warn(`[BASH-MONITOR] restoreTaskOutputFiles failed: ${e.message}`);
+        });
+
+        // Update task status and notify frontend via at-least-once delivery
+        if (task) {
+          task.status = 'completed';
+          task.endTime = Date.now();
+          evictOldestCompletedTasks();
+
+          const command = task.input?.command || '';
+          const OUTPUT_CAP = 50000;
+          const outputSnippet = outputContent
+            ? outputContent.length > OUTPUT_CAP
+              ? outputContent.slice(-OUTPUT_CAP) + `\n... (truncated, showing last ${OUTPUT_CAP} chars)`
+              : outputContent
+            : '';
+
+          if (task.sessionId) {
+            emitTaskEvent(task.sessionId, {
+              type: 'bash-completed',
+              bash: { id: taskId, endTime: Date.now(), command },
+              background: true,
+              outputSnippet
+            });
+          }
+        }
+      }
+    } catch (e) {
+      console.error(`[BASH-MONITOR] Error monitoring ${taskId}:`, e.message);
+    }
+  }, 2000);
+
+  bashMonitors.set(taskId, interval);
+
+  // Safety: stop after 1 hour, close fd
+  setTimeout(() => {
+    if (bashMonitors.has(taskId)) {
+      clearInterval(interval);
+      bashMonitors.delete(taskId);
+      if (fd !== null) {
+        try { fs.closeSync(fd); } catch (_) {}
+      }
+    }
+  }, 60 * 60 * 1000);
+}
+
+/**
+ * Evicts oldest completed tasks when backgroundTasks exceeds the size limit.
+ * Only removes entries with status === 'completed'; running tasks are never evicted.
+ */
+function evictOldestCompletedTasks() {
+  if (backgroundTasks.size <= BACKGROUND_TASKS_MAX) return;
+
+  for (const [taskId, task] of backgroundTasks) {
+    if (backgroundTasks.size <= BACKGROUND_TASKS_MAX) break;
+    if (task.status === 'completed') {
+      backgroundTasks.delete(taskId);
+      backgroundTaskOutputs.delete(taskId);
+    }
+  }
+}
 
 const TOOL_APPROVAL_TIMEOUT_MS = parseInt(process.env.CLAUDE_TOOL_APPROVAL_TIMEOUT_MS, 10) || 55000;
 
@@ -199,6 +667,29 @@ function mapCliOptionsToSDK(options = {}) {
     sdkOptions.resume = sessionId;
   }
 
+  // Allow Claude's Read/Bash tools to access task output directories.
+  // The Claude CLI enforces a path whitelist — only cwd and explicitly listed directories
+  // are accessible. Background task output files land in /tmp/claude/tasks/ (Linux) or
+  // <drive>:\tmp\claude\tasks\ (Windows), which is outside cwd and thus blocked by default.
+  {
+    const taskDirsToAllow = new Set();
+    const detected = findClaudeTasksDir();
+    if (detected) taskDirsToAllow.add(detected);
+    taskDirsToAllow.add(getFallbackTasksDir());
+    sdkOptions.additionalDirectories = Array.from(taskDirsToAllow);
+  }
+
+  // Strip CLAUDECODE from the spawned CLI environment.
+  // PM2 (or any parent Claude Code session) may have CLAUDECODE=1 set, which causes
+  // CLI 2.1.50+ to refuse to start with "Claude Code cannot be launched inside another
+  // Claude Code session."
+  sdkOptions.spawnClaudeCodeProcess = ({ command, args, cwd, env, signal }) => {
+    const cleanEnv = { ...env };
+    delete cleanEnv.CLAUDECODE;
+    delete cleanEnv.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC;
+    return spawn(command, args, { cwd, env: cleanEnv, signal });
+  };
+
   return sdkOptions;
 }
 
@@ -320,7 +811,7 @@ async function handleImages(command, images, cwd) {
     // Create temp directory in the project directory
     const workingDir = cwd || process.cwd();
     tempDir = path.join(workingDir, '.tmp', 'images', Date.now().toString());
-    await fs.mkdir(tempDir, { recursive: true });
+    await fsPromises.mkdir(tempDir, { recursive: true });
 
     // Save each image to a temp file
     for (const [index, image] of images.entries()) {
@@ -337,7 +828,7 @@ async function handleImages(command, images, cwd) {
       const filepath = path.join(tempDir, filename);
 
       // Write base64 data to file
-      await fs.writeFile(filepath, Buffer.from(base64Data, 'base64'));
+      await fsPromises.writeFile(filepath, Buffer.from(base64Data, 'base64'));
       tempImagePaths.push(filepath);
     }
 
@@ -369,14 +860,14 @@ async function cleanupTempFiles(tempImagePaths, tempDir) {
   try {
     // Delete individual temp files
     for (const imagePath of tempImagePaths) {
-      await fs.unlink(imagePath).catch(err =>
+      await fsPromises.unlink(imagePath).catch(err =>
         console.error(`Failed to delete temp image ${imagePath}:`, err)
       );
     }
 
     // Delete temp directory
     if (tempDir) {
-      await fs.rm(tempDir, { recursive: true, force: true }).catch(err =>
+      await fsPromises.rm(tempDir, { recursive: true, force: true }).catch(err =>
         console.error(`Failed to delete temp directory ${tempDir}:`, err)
       );
     }
@@ -398,7 +889,7 @@ async function loadMcpConfig(cwd) {
 
     // Check if config file exists
     try {
-      await fs.access(claudeConfigPath);
+      await fsPromises.access(claudeConfigPath);
     } catch (error) {
       // File doesn't exist, return null
       console.log('No ~/.claude.json found, proceeding without MCP servers');
@@ -408,7 +899,7 @@ async function loadMcpConfig(cwd) {
     // Read and parse config file
     let claudeConfig;
     try {
-      const configContent = await fs.readFile(claudeConfigPath, 'utf8');
+      const configContent = await fsPromises.readFile(claudeConfigPath, 'utf8');
       claudeConfig = JSON.parse(configContent);
     } catch (error) {
       console.error('Failed to parse ~/.claude.json:', error.message);
@@ -448,6 +939,48 @@ async function loadMcpConfig(cwd) {
 }
 
 /**
+ * Restores task output files that were cleaned up by the CLI after session end.
+ */
+async function restoreTaskOutputFiles() {
+  if (backgroundTaskOutputs.size === 0) return;
+
+  let tasksDir = findClaudeTasksDir();
+  const fallbackDir = getFallbackTasksDir();
+
+  if (!tasksDir) {
+    try {
+      await fsPromises.mkdir(fallbackDir, { recursive: true });
+      tasksDir = fallbackDir;
+    } catch (e) {
+      console.error('[RESTORE] Failed to create fallback tasks dir:', e.message);
+      return;
+    }
+  }
+
+  for (const [taskId, output] of backgroundTaskOutputs) {
+    if (output.type !== 'inline' || !output.content) continue;
+
+    let outputFile;
+    if (output.filePath) {
+      outputFile = output.filePath;
+    } else if (output.agentId) {
+      outputFile = path.join(tasksDir, `${output.agentId}.output`);
+    } else {
+      continue;
+    }
+
+    if (!fs.existsSync(outputFile)) {
+      try {
+        await fsPromises.mkdir(path.dirname(outputFile), { recursive: true });
+        await fsPromises.writeFile(outputFile, output.content, 'utf-8');
+      } catch (e) {
+        console.error(`[RESTORE] Failed to write ${outputFile}:`, e.message);
+      }
+    }
+  }
+}
+
+/**
  * Executes a Claude query using the SDK
  * @param {string} command - User prompt/command
  * @param {Object} options - Query options
@@ -460,6 +993,9 @@ async function queryClaudeSDK(command, options = {}, ws) {
   let sessionCreatedSent = false;
   let tempImagePaths = [];
   let tempDir = null;
+
+  const activeBashToolIds = new Set();
+  const backgroundBashToolIds = new Set();
 
   try {
     // Map CLI options to SDK format
@@ -596,6 +1132,7 @@ async function queryClaudeSDK(command, options = {}, ws) {
       // logs which model was used in the message
       console.log("---> Model was sent using:", Object.keys(message.modelUsage || {}));
 
+      // Debug: log SDK message structure for background task debugging
       // Transform and send message to WebSocket
       const transformedMessage = transformMessage(message);
       ws.send({
@@ -603,6 +1140,249 @@ async function queryClaudeSDK(command, options = {}, ws) {
         data: transformedMessage,
         sessionId: capturedSessionId || sessionId || null
       });
+
+      // Handle SDK task lifecycle messages (primary detection for background tasks)
+      if (message.type === 'system' && message.subtype === 'task_started' && message.tool_use_id) {
+        const task = backgroundTasks.get(message.tool_use_id);
+        if (task) {
+          task.agentId = message.task_id;
+          task.status = 'monitoring';
+          // Start the file/transcript monitor as a secondary fallback
+          monitorSubagentCompletion(message.task_id, message.tool_use_id, ws);
+        }
+      }
+
+      if (message.type === 'system' && message.subtype === 'task_notification' && message.tool_use_id) {
+        const task = backgroundTasks.get(message.tool_use_id);
+        if (task && (task.status === 'monitoring' || task.status === 'running')) {
+          const agentId = task.agentId || message.task_id;
+
+          // Read output from output_file if available
+          let output = message.summary || '';
+          if (message.output_file) {
+            try {
+              const fileContent = fs.readFileSync(message.output_file, 'utf-8');
+              if (fileContent.includes('--- RESULT ---')) {
+                output = fileContent.split('--- RESULT ---')[1]?.trim() || output;
+              } else {
+                output = fileContent || output;
+              }
+            } catch (e) { /* file may already be cleaned up */ }
+          }
+
+          task.status = 'completed';
+          task.endTime = Date.now();
+          evictOldestCompletedTasks();
+
+          backgroundTaskOutputs.set(message.tool_use_id, {
+            type: 'inline',
+            content: output,
+            agentId
+          });
+
+          const taskSessionId = task.sessionId;
+          if (taskSessionId) {
+            if (message.status === 'completed') {
+              emitTaskEvent(taskSessionId, {
+                type: 'subagent-completed',
+                taskId: message.tool_use_id,
+                output,
+                agentId
+              });
+            }
+            emitTaskEvent(taskSessionId, {
+              type: 'background-task-completed',
+              taskId: message.tool_use_id
+            });
+          }
+
+          // Stop file/transcript monitor if running
+          if (agentId && subagentMonitors.has(agentId)) {
+            const monitor = subagentMonitors.get(agentId);
+            if (monitor) clearInterval(monitor);
+            subagentMonitors.delete(agentId);
+            transcriptPathCache.delete(agentId);
+          }
+        }
+      }
+
+      // Detect background tasks (Task/Bash with run_in_background=true)
+      const messageData = message.message || message;
+      if (messageData && Array.isArray(messageData.content)) {
+        messageData.content.forEach((part) => {
+          if (part.type === 'tool_use') {
+            const toolName = part.name;
+            const toolInput = part.input;
+            const toolId = part.id;
+
+            // Track all Bash commands
+            if (toolName === 'Bash') {
+              activeBashToolIds.add(toolId);
+              if (toolInput.run_in_background) {
+                backgroundBashToolIds.add(toolId);
+                const taskInfo = {
+                  taskId: toolId,
+                  toolName: 'Bash',
+                  input: toolInput,
+                  sessionId: capturedSessionId || sessionId || null,
+                  startTime: Date.now(),
+                  status: 'running'
+                };
+                backgroundTasks.set(toolId, taskInfo);
+                evictOldestCompletedTasks();
+                ws.send({
+                  type: 'bash-started',
+                  sessionId: capturedSessionId || sessionId || null,
+                  bash: {
+                    id: toolId,
+                    command: toolInput.command,
+                    description: toolInput.description,
+                    run_in_background: true,
+                    startTime: Date.now()
+                  }
+                });
+              }
+            }
+
+            // Check if this is a background task (non-Bash tools)
+            if (toolInput && toolInput.run_in_background && toolName !== 'Bash') {
+              const taskInfo = {
+                taskId: toolId,
+                toolName,
+                input: toolInput,
+                sessionId: capturedSessionId || sessionId || null,
+                startTime: Date.now(),
+                status: 'running'
+              };
+              backgroundTasks.set(toolId, taskInfo);
+              evictOldestCompletedTasks();
+              ws.send({
+                type: 'background-task-started',
+                sessionId: capturedSessionId || sessionId || null,
+                task: taskInfo
+              });
+            }
+          }
+
+          // Detect task completion (tool_result for background tasks and bash commands)
+          if (part.type === 'tool_result') {
+            const toolUseId = part.tool_use_id;
+            // Capture output for background bash tasks
+            if (backgroundBashToolIds.has(toolUseId)) {
+              const rawContent = typeof part.content === 'string' ? part.content
+                : Array.isArray(part.content) ? part.content.map(c => c.text || '').join('')
+                : '';
+
+              const outputFileMatch = rawContent.match(/Output is being written to:\s*(\S+)/);
+              let outputPath = null;
+              if (outputFileMatch) {
+                outputPath = outputFileMatch[1];
+                if (outputPath.startsWith('/tmp/') && process.platform === 'win32') {
+                  const driveLetter = process.cwd()[0];
+                  outputPath = outputPath.replace('/tmp/', `${driveLetter}:\\tmp\\`).replace(/\//g, '\\');
+                }
+                const task = backgroundTasks.get(toolUseId);
+                const commandText = task?.input?.command || '';
+                backgroundTaskOutputs.set(toolUseId, {
+                  type: 'file',
+                  path: outputPath,
+                  command: commandText
+                });
+              }
+              if (rawContent) {
+                const existing = backgroundTaskOutputs.get(toolUseId);
+                if (existing) {
+                  existing.cliResponse = rawContent;
+                } else {
+                  backgroundTaskOutputs.set(toolUseId, { type: 'inline', content: rawContent });
+                }
+              }
+              if (outputPath) {
+                monitorBackgroundBash(toolUseId, outputPath, ws);
+              }
+            }
+
+            // Send bash-completed for tracked non-background bash commands
+            if (activeBashToolIds.has(toolUseId) && !backgroundBashToolIds.has(toolUseId)) {
+              activeBashToolIds.delete(toolUseId);
+              ws.send({
+                type: 'bash-completed',
+                sessionId: capturedSessionId || sessionId || null,
+                bash: { id: toolUseId, endTime: Date.now() }
+              });
+            }
+
+            const task = backgroundTasks.get(toolUseId);
+            if (task && !backgroundBashToolIds.has(toolUseId)) {
+              const rawContent = typeof part.content === 'string' ? part.content
+                : Array.isArray(part.content) ? part.content.map(c => c.text || '').join('')
+                : '';
+
+              const agentIdMatch = rawContent.match(/agentId:\s*(\S+)/);
+              if (agentIdMatch && task.input?.run_in_background) {
+                const agentId = agentIdMatch[1];
+                // Set agentId if task_started hasn't already done so
+                if (!task.agentId) {
+                  task.agentId = agentId;
+                }
+                // Start monitor only if task_started hasn't already done so
+                if (task.status !== 'monitoring') {
+                  monitorSubagentCompletion(agentId, toolUseId, ws);
+                  task.status = 'monitoring';
+                }
+                return;
+              }
+
+              // If task is monitoring, a second tool_result is the completion result.
+              // But skip if task_notification already completed it.
+              if (task.status === 'monitoring') {
+                task.status = 'completed';
+                task.endTime = Date.now();
+                evictOldestCompletedTasks();
+                backgroundTaskOutputs.set(toolUseId, {
+                  type: 'inline',
+                  content: rawContent,
+                  agentId: task.agentId
+                });
+                const taskSessionId = task.sessionId;
+                if (taskSessionId) {
+                  emitTaskEvent(taskSessionId, {
+                    type: 'subagent-completed',
+                    taskId: toolUseId,
+                    output: rawContent
+                  });
+                  emitTaskEvent(taskSessionId, {
+                    type: 'background-task-completed',
+                    taskId: toolUseId
+                  });
+                }
+                // Stop the file/transcript monitor if still running
+                if (task.agentId && subagentMonitors.has(task.agentId)) {
+                  const monitor = subagentMonitors.get(task.agentId);
+                  if (monitor) clearInterval(monitor);
+                  subagentMonitors.delete(task.agentId);
+                  transcriptPathCache.delete(task.agentId);
+                }
+                return;
+              }
+
+              // Already completed by task_notification — skip
+              if (task.status === 'completed') {
+                return;
+              }
+
+              task.status = 'completed';
+              task.endTime = Date.now();
+              evictOldestCompletedTasks();
+              ws.send({
+                type: 'background-task-completed',
+                sessionId: task.sessionId,
+                taskId: toolUseId
+              });
+            }
+          }
+        });
+      }
 
       // Extract and send token budget updates from result messages
       if (message.type === 'result') {
@@ -615,6 +1395,8 @@ async function queryClaudeSDK(command, options = {}, ws) {
             sessionId: capturedSessionId || sessionId || null
           });
         }
+        // SDK bug workaround: generator may hang after result message.
+        break;
       }
     }
 
@@ -625,6 +1407,9 @@ async function queryClaudeSDK(command, options = {}, ws) {
 
     // Clean up temporary image files
     await cleanupTempFiles(tempImagePaths, tempDir);
+
+    // Restore any task output files the CLI deleted on exit
+    await restoreTaskOutputFiles();
 
     // Send completion event
     console.log('Streaming complete, sending claude-complete event');
@@ -646,6 +1431,9 @@ async function queryClaudeSDK(command, options = {}, ws) {
 
     // Clean up temporary image files on error
     await cleanupTempFiles(tempImagePaths, tempDir);
+
+    // Restore any task output files the CLI deleted on exit
+    await restoreTaskOutputFiles();
 
     // Send error to WebSocket
     ws.send({
@@ -717,5 +1505,7 @@ export {
   abortClaudeSDKSession,
   isClaudeSDKSessionActive,
   getActiveClaudeSDKSessions,
-  resolveToolApproval
+  resolveToolApproval,
+  backgroundTasks,
+  backgroundTaskOutputs
 };

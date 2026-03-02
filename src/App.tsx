@@ -7,6 +7,7 @@ import { TasksSettingsProvider } from './contexts/TasksSettingsContext';
 import { WebSocketProvider } from './contexts/WebSocketContext';
 import ProtectedRoute from './components/ProtectedRoute';
 import AppContent from './components/app/AppContent';
+import BackgroundTasksPage from './components/app/BackgroundTasksPage';
 import i18n from './i18n/config.js';
 
 export default function App() {
@@ -22,6 +23,7 @@ export default function App() {
                     <Routes>
                       <Route path="/" element={<AppContent />} />
                       <Route path="/session/:sessionId" element={<AppContent />} />
+                      <Route path="/background-tasks" element={<BackgroundTasksPage />} />
                     </Routes>
                   </Router>
                 </ProtectedRoute>

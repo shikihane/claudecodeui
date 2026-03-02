@@ -1,0 +1,43 @@
+{
+  "title": "后台任务",
+  "tabs": {
+    "subagents": "子代理",
+    "bash": "Bash 命令"
+  },
+  "empty": {
+    "subagents": "暂无子代理任务",
+    "bash": "暂无 Bash 命令"
+  },
+  "status": {
+    "running": "运行中",
+    "completed": "已完成",
+    "terminating": "正在终止...",
+    "background": "后台"
+  },
+  "actions": {
+    "dismiss": "终止任务",
+    "dismissBash": "终止命令",
+    "remove": "移除"
+  },
+  "output": {
+    "label": "输出",
+    "showing": "显示最后 {{shown}} / {{total}} 行"
+  },
+  "progress": {
+    "toolCalls": "{{count}} 次工具调用",
+    "toolCalls_one": "{{count}} 次工具调用"
+  },
+  "taskId": {
+    "label": "任务 ID"
+  },
+  "subagent": {
+    "defaultType": "代理",
+    "defaultDescription": "执行任务中",
+    "title": "子代理 / {{type}}: {{description}}",
+    "currently": "当前:",
+    "completed": "已完成 ({{count}} 个工具)",
+    "completed_one": "已完成 ({{count}} 个工具)",
+    "viewToolHistory": "查看工具历史 ({{count}})",
+    "error": "(错误)"
+  }
+}
