@@ -33,6 +33,7 @@ console.log('PORT from env:', process.env.PORT);
 
 import express from 'express';
 import { WebSocketServer, WebSocket } from 'ws';
+import { Server as SocketIOServer } from 'socket.io';
 import os from 'os';
 import http from 'http';
 import cors from 'cors';
@@ -46,6 +47,9 @@ import fetch from 'node-fetch';
 import mime from 'mime-types';
 
 import { connectedClients, ackEvent, syncPendingEvents } from './ws-clients.js';
+import { setupRoomManagement, broadcastToAll, broadcastToSession } from './socket-rooms.js';
+import { setupHeartbeat } from './socket-heartbeat.js';
+import { getStateSnapshot } from './session-state.js';
 import { getProjects, getSessions, getSessionMessages, renameProject, deleteSession, deleteProject, addProjectManually, extractProjectDirectory, clearProjectDirectoryCache } from './projects.js';
 import { queryClaudeSDK, abortClaudeSDKSession, isClaudeSDKSessionActive, getActiveClaudeSDKSessions, resolveToolApproval, getPendingApprovalsForSession, reconnectSessionWriter, backgroundTasks, backgroundTaskOutputs } from './claude-sdk.js';
 import { spawnCursor, abortCursorSession, isCursorSessionActive, getActiveCursorSessions } from './cursor-cli.js';
@@ -331,6 +335,59 @@ async function setupProjectsWatcher() {
 const app = express();
 const server = http.createServer(app);
 
+// Socket.IO server — handles /socket.io path for chat communication
+// Coexists with raw WebSocket on /shell for terminal
+const io = new SocketIOServer(server, {
+  path: '/socket.io',
+  cors: {
+    origin: process.env.NODE_ENV === 'production'
+      ? false
+      : ['http://localhost:5173', 'http://localhost:5174'],
+    credentials: true
+  },
+  connectionStateRecovery: {
+    maxDisconnectionDuration: 2 * 60 * 1000,
+    skipMiddlewares: true
+  },
+  pingInterval: 25000,
+  pingTimeout: 20000
+});
+
+// Socket.IO auth middleware
+io.use((socket, next) => {
+  if (IS_PLATFORM) {
+    const user = authenticateWebSocket(null);
+    if (!user) return next(new Error('Platform mode: No user found'));
+    socket.data.user = user;
+    return next();
+  }
+  const token = socket.handshake.auth?.token;
+  const user = authenticateWebSocket(token);
+  if (!user) return next(new Error('Authentication failed'));
+  socket.data.user = user;
+  next();
+});
+
+// Set up Socket.IO room management and heartbeat
+setupRoomManagement(io);
+setupHeartbeat(io);
+
+// Socket.IO connection handler
+io.on('connection', (socket) => {
+  console.log('[Socket.IO] Client connected:', socket.id);
+
+  // State snapshot request (for tab recovery)
+  socket.on('request-state-snapshot', (sessionId, ack) => {
+    if (typeof ack === 'function') {
+      ack(getStateSnapshot(sessionId));
+    }
+  });
+
+  socket.on('disconnect', (reason) => {
+    console.log('[Socket.IO] Client disconnected:', socket.id, reason);
+  });
+});
+
 const ptySessionsMap = new Map();
 const PTY_SESSION_TIMEOUT = 30 * 60 * 1000;
 const SHELL_URL_PARSE_BUFFER_LIMIT = 32768;
@@ -437,6 +494,7 @@ const wss = new WebSocketServer({
 
 // Make WebSocket server available to routes
 app.locals.wss = wss;
+app.locals.io = io;
 
 app.use(cors());
 app.use(express.json({
