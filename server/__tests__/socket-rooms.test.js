@@ -49,7 +49,11 @@ describe('Socket.IO Room Management', () => {
     const sessionId = 'session-abc';
     client1.emit('join-session', sessionId);
     client2.emit('join-session', sessionId);
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Wait for both clients to receive joined-session confirmation
+    await Promise.all([
+      waitForEvent(client1, 'joined-session'),
+      waitForEvent(client2, 'joined-session')
+    ]);
 
     let received1 = false, received2 = false, received3 = false;
     client1.on('room-message', () => { received1 = true; });
