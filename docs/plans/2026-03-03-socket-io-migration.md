@@ -23,12 +23,46 @@
 
 ### 48 tests pass across 14 test files
 
-### 下一步操作
+### 架构决策
 
-1. **Task 12**: 在 `server/claude-sdk.js` 中集成 session-state 调用 (addStreamingChunk/finalizeStreamingMessage/addPendingPermission)
-2. **Task 13**: 在 `cursor-cli.js` / `openai-codex.js` 中替换 ws.send 为 writer.send
-3. **Task 14**: 在 `server/index.js` 中替换 connectedClients.forEach 为 broadcastToAll
-4. **Task 15**: 创建 integration.test.js，清理旧 WS 代码
+- `/shell` PTY 终端保留原生 WebSocket (`ws` 库不删除)
+- Socket.IO 仅替代 `/ws` 聊天通讯和广播
+- 最终状态: `wss` 只处理 `/shell`，`io` 处理所有聊天/事件
+
+### 下一步操作 (给下一个 agent)
+
+**所有测试已写好并通过，只需做代码集成：**
+
+#### Task 12: claude-sdk.js 集成 session-state
+- 文件: `server/claude-sdk.js`
+- 测试: `server/__tests__/claude-sdk-socketio.test.js` (4 tests pass)
+- 在文件顶部添加 import:
+  ```javascript
+  import { addStreamingChunk, finalizeStreamingMessage, addPendingPermission, removePendingPermission } from './session-state.js';
+  ```
+- 修改点 (行号基于当前 HEAD `93a5c75`):
+  1. **~line 1139** (`ws.send({ type: 'claude-response' })` 附近): 添加 `addStreamingChunk(sessionId, delta.text)` — 在每个 content_block_delta 发送时累积文本
+  2. **~line 1312** (`message.type === 'result'` 分支): 添加 `finalizeStreamingMessage(sessionId)` — 流结束时归档消息
+  3. **~line 1030** (canUseTool callback 中 `ws.send({ type: 'claude-permission-request' })`): 添加 `addPendingPermission(sessionId, { requestId, toolName, input })`
+  4. **~line 517** (`resolveToolApproval` 函数): 添加 `removePendingPermission(sessionId, requestId)`
+
+#### Task 13: Cursor/Codex 适配
+- 文件: `server/cursor-cli.js`, `server/openai-codex.js`
+- 测试: `server/__tests__/provider-socketio.test.js` (3 tests pass)
+- 此任务可**暂缓** — 当前 writer 已经是 WebSocketWriter 包装，Socket.IO 替换需要等前端也切换后才有意义
+
+#### Task 14: 广播迁移
+- 文件: `server/index.js`
+- 测试: `server/__tests__/broadcasting.test.js` (3 tests pass)
+- 替换 `server/index.js` 中两处 `connectedClients.forEach`:
+  1. **`broadcastProgress()` 函数 (~line 216)**: `connectedClients.forEach(client => {...})` → `io.emit('loading_progress', progress)`
+  2. **`debouncedUpdate()` (~line 273)**: `connectedClients.forEach(client => {...})` → `io.emit('projects_updated', data)`
+- 注意: `broadcastToAll` 和 `broadcastToSession` 已从 `socket-rooms.js` import 到 index.js
+
+#### Task 15: 集成测试 + 清理
+- 创建 `server/__tests__/integration.test.js` (内容见 plan 文件 Task 15 section)
+- 清理: 删除 `handleChatConnection` 函数、`WebSocketWriter` class、`connectedClients` 在 chat 中的使用
+- **不删除**: `wss`、`handleShellConnection`、`/shell` 路径、`ws` 库
 
 ### 并行执行经验教训
 
