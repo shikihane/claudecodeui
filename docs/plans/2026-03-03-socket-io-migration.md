@@ -10,31 +10,25 @@
 
 ---
 
-## 🔄 执行进度 (2026-03-03)
+## 🔄 执行进度 (2026-03-04 更新)
 
 | Task | 描述 | 状态 | 备注 |
 |------|------|------|------|
-| 0 | 测试基础设施 | ✅ 已合并 | Commit `01f62a9` on `feature/personal-enhancements` |
-| 3 | Room 管理 | ⏳ 待合并 | Worktree branch `worktree-agent-a7356a1f`, commit `4b9b3b9` |
-| 4 | 事件分发 | ⏳ 待合并 | 同 Agent A (与 Task 3 一起) |
-| 5 | Writer 适配器 | ⏳ 待合并 | Worktree branch `worktree-agent-a0dee5f1`, commit `8c01dcb` |
-| 6+7 | Session State + Snapshot | ⏳ 待合并 | 同 Agent B (与 Task 5 一起) |
-| 8 | Heartbeat | ⏳ 待合并 | Worktree branch `worktree-agent-a92a1cc5`, commit `0863792` |
-| 9-11 | 前端模块 | ❌ 未开始 | Agent D 因 git config 锁失败，需重试 |
-| 1-2 | Socket.IO 初始化 + 共存 | 🔲 未开始 | Wave 2, 修改 server/index.js |
-| 12-14 | Provider 集成 | 🔲 未开始 | Wave 2, 修改 claude-sdk.js 等 |
-| 15 | 集成测试 + 清理 | 🔲 未开始 | Wave 2, 最后执行 |
+| 0 | 测试基础设施 | ✅ 已合并 | Commit `01f62a9` |
+| 3-8 | Room/Events/Writer/State/Snapshot/Heartbeat | ✅ 已合并 | Commit `b72989b` — 从 worktree 提取新文件 |
+| 9-11 | 前端模块 (Context/Visibility/EventHandlers) | ✅ 已合并 | Commit `13c9390` |
+| 1-2 | Socket.IO 初始化 + WS 共存 | ✅ 已合并 | Commit `632a21b` — server/index.js 集成 |
+| 12-14 | Provider 集成 | ⏳ 测试已写 | Commit `5df221b` — 测试通过，代码集成待完成 |
+| 15 | 集成测试 + 清理 | 🔲 未开始 | 最后执行 |
+
+### 48 tests pass across 14 test files
 
 ### 下一步操作
 
-1. **合并 3 个 worktree 分支** — 建议用 cherry-pick 避免 package.json 冲突:
-   ```bash
-   # 这些分支只新增文件，cherry-pick 比 merge 更简单
-   # 但注意每个 worktree branch 基于旧版 feature/personal-enhancements
-   # 最安全做法: 只提取新文件，手动 git add + commit
-   ```
-2. **重试 Task 9-11 (前端模块)** — 直接在主分支手写，不用 worktree
-3. **Wave 2: 顺序执行** Task 1+2, 12-14, 15 (都修改共享文件)
+1. **Task 12**: 在 `server/claude-sdk.js` 中集成 session-state 调用 (addStreamingChunk/finalizeStreamingMessage/addPendingPermission)
+2. **Task 13**: 在 `cursor-cli.js` / `openai-codex.js` 中替换 ws.send 为 writer.send
+3. **Task 14**: 在 `server/index.js` 中替换 connectedClients.forEach 为 broadcastToAll
+4. **Task 15**: 创建 integration.test.js，清理旧 WS 代码
 
 ### 并行执行经验教训
 
