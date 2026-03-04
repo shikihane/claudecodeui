@@ -19,7 +19,6 @@ type PendingViewSession = {
 function ChatInterface({
   selectedProject,
   selectedSession,
-  ws,
   sendMessage,
   onFileOpen,
   onInputFocusChange,
@@ -110,7 +109,6 @@ function ChatInterface({
   } = useChatSessionState({
     selectedProject,
     selectedSession,
-    ws,
     sendMessage,
     autoScrollToBottom,
     externalMessageUpdate,

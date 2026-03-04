@@ -13,7 +13,7 @@ import type {
 type UseProjectsStateArgs = {
   sessionId?: string;
   navigate: NavigateFunction;
-  latestMessage: AppSocketMessage | null;
+  latestMessage?: AppSocketMessage | null;
   isMobile: boolean;
   activeSessions: Set<string>;
 };

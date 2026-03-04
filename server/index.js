@@ -47,6 +47,7 @@ import fetch from 'node-fetch';
 import mime from 'mime-types';
 
 import { ackEvent, syncPendingEvents } from './ws-clients.js';
+import { createSocketWriter } from './socket-writer.js';
 import { setupRoomManagement, broadcastToAll, broadcastToSession } from './socket-rooms.js';
 import { setupHeartbeat } from './socket-heartbeat.js';
 import { getStateSnapshot } from './session-state.js';
@@ -367,6 +368,91 @@ io.on('connection', (socket) => {
   socket.on('request-state-snapshot', (sessionId, ack) => {
     if (typeof ack === 'function') {
       ack(getStateSnapshot(sessionId));
+    }
+  });
+
+  // Chat command handlers
+  socket.on('claude-command', async (data) => {
+    console.log('[Socket.IO] claude-command received, session:', data.options?.sessionId);
+    const writer = createSocketWriter(socket);
+    try {
+      await queryClaudeSDK(data.command, data.options, writer);
+    } catch (err) {
+      console.error('[Socket.IO] claude-command error:', err);
+      socket.emit('claude-error', { error: err.message, sessionId: data.options?.sessionId });
+    }
+  });
+
+  socket.on('cursor-command', async (data) => {
+    console.log('[Socket.IO] cursor-command received, session:', data.sessionId);
+    const writer = createSocketWriter(socket);
+    try {
+      await spawnCursor(data.command, data.options, writer);
+    } catch (err) {
+      console.error('[Socket.IO] cursor-command error:', err);
+      socket.emit('claude-error', { error: err.message, sessionId: data.sessionId });
+    }
+  });
+
+  socket.on('codex-command', async (data) => {
+    console.log('[Socket.IO] codex-command received, session:', data.sessionId);
+    const writer = createSocketWriter(socket);
+    try {
+      await queryCodex(data.command, data.options, writer);
+    } catch (err) {
+      console.error('[Socket.IO] codex-command error:', err);
+      socket.emit('claude-error', { error: err.message, sessionId: data.sessionId });
+    }
+  });
+
+  socket.on('abort-session', async (data) => {
+    const { sessionId, provider } = data;
+    console.log('[Socket.IO] abort-session received, session:', sessionId, 'provider:', provider);
+    try {
+      if (provider === 'cursor') {
+        abortCursorSession(sessionId);
+      } else if (provider === 'codex') {
+        abortCodexSession(sessionId);
+      } else {
+        await abortClaudeSDKSession(sessionId);
+      }
+      socket.emit('session-aborted', { sessionId });
+    } catch (err) {
+      console.error('[Socket.IO] abort-session error:', err);
+    }
+  });
+
+  socket.on('claude-permission-response', (data) => {
+    console.log('[Socket.IO] permission response received, requestId:', data.requestId);
+    resolveToolApproval(data.requestId, data);
+  });
+
+  socket.on('check-session-status', (data) => {
+    const { sessionId, provider } = data;
+    let isActive = false;
+    if (provider === 'cursor') {
+      isActive = isCursorSessionActive(sessionId);
+    } else if (provider === 'codex') {
+      isActive = isCodexSessionActive(sessionId);
+    } else {
+      isActive = isClaudeSDKSessionActive(sessionId);
+    }
+    socket.emit('session-status', { sessionId, isActive });
+  });
+
+  socket.on('get-active-sessions', (data) => {
+    if (data?.type === 'get-pending-permissions' && data.sessionId) {
+      const pending = getPendingApprovalsForSession(data.sessionId);
+      if (pending && pending.length > 0) {
+        socket.emit('pending-permissions', { sessionId: data.sessionId, permissions: pending });
+      }
+    } else {
+      const sessions = [
+        ...getActiveClaudeSDKSessions().map(s => ({ ...s, provider: 'claude' })),
+        ...getActiveCursorSessions().map(s => ({ ...s, provider: 'cursor' })),
+        ...getActiveCodexSessions().map(s => ({ ...s, provider: 'codex' })),
+      ];
+      socket.emit('active-sessions', { sessions });
     }
   });
 

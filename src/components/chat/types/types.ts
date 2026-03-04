@@ -100,8 +100,7 @@ export interface Question {
 export interface ChatInterfaceProps {
   selectedProject: Project | null;
   selectedSession: ProjectSession | null;
-  ws: WebSocket | null;
-  sendMessage: (message: unknown) => void;
+  sendMessage: (eventOrMessage: string | Record<string, any>, ...args: any[]) => void;
   onFileOpen?: (filePath: string, diffInfo?: any) => void;
   onInputFocusChange?: (focused: boolean) => void;
   onSessionActive?: (sessionId?: string | null) => void;

@@ -23,8 +23,7 @@ type PendingViewSession = {
 interface UseChatSessionStateArgs {
   selectedProject: Project | null;
   selectedSession: ProjectSession | null;
-  ws: WebSocket | null;
-  sendMessage: (message: unknown) => void;
+  sendMessage: (eventOrMessage: string | Record<string, any>, ...args: any[]) => void;
   autoScrollToBottom?: boolean;
   externalMessageUpdate?: number;
   processingSessions?: Set<string>;
@@ -40,7 +39,6 @@ interface ScrollRestoreState {
 export function useChatSessionState({
   selectedProject,
   selectedSession,
-  ws,
   sendMessage,
   autoScrollToBottom,
   externalMessageUpdate,
@@ -353,25 +351,21 @@ export function useChatSessionState({
           setTokenBudget(null);
           setIsLoading(false);
 
-          if (ws) {
-            sendMessage({
-              type: 'check-session-status',
-              sessionId: selectedSession.id,
-              provider,
-            });
-          }
+          sendMessage({
+            type: 'check-session-status',
+            sessionId: selectedSession.id,
+            provider,
+          });
         } else if (currentSessionId === null) {
           messagesOffsetRef.current = 0;
           setHasMoreMessages(false);
           setTotalMessages(0);
 
-          if (ws) {
-            sendMessage({
-              type: 'check-session-status',
-              sessionId: selectedSession.id,
-              provider,
-            });
-          }
+          sendMessage({
+            type: 'check-session-status',
+            sessionId: selectedSession.id,
+            provider,
+          });
         }
 
         // Skip loading if session ID hasn't changed and we already loaded it
@@ -448,7 +442,6 @@ export function useChatSessionState({
     selectedProject,
     selectedSession?.id, // Only depend on session ID, not the entire object
     sendMessage,
-    ws,
   ]);
 
   useEffect(() => {

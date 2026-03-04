@@ -37,7 +37,6 @@ function MainContent({
   selectedSession,
   activeTab,
   setActiveTab,
-  ws,
   sendMessage,
   isMobile,
   onMenuClick,
@@ -114,7 +113,6 @@ function MainContent({
               <ChatInterface
                 selectedProject={selectedProject}
                 selectedSession={selectedSession}
-                ws={ws}
                 sendMessage={sendMessage}
                 onFileOpen={handleFileOpen}
                 onInputFocusChange={onInputFocusChange}

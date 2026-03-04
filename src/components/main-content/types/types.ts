@@ -51,8 +51,7 @@ export interface MainContentProps {
   selectedSession: ProjectSession | null;
   activeTab: AppTab;
   setActiveTab: Dispatch<SetStateAction<AppTab>>;
-  ws: WebSocket | null;
-  sendMessage: (message: unknown) => void;
+  sendMessage: (eventOrMessage: string | Record<string, any>, ...args: any[]) => void;
   isMobile: boolean;
   onMenuClick: () => void;
   isLoading: boolean;

@@ -6,7 +6,7 @@ interface SocketIOContextType {
   socket: Socket | null;
   isConnected: boolean;
   recovered: boolean;
-  emit: (event: string, ...args: any[]) => void;
+  emit: (eventOrMessage: string | Record<string, any>, ...args: any[]) => void;
 }
 
 const SocketIOContext = createContext<SocketIOContextType>({
@@ -52,8 +52,15 @@ export function SocketIOProvider({ children }: { children: React.ReactNode }) {
     };
   }, [token]);
 
-  const emit = useCallback((event: string, ...args: any[]) => {
-    socketRef.current?.emit(event, ...args);
+  const emit = useCallback((eventOrMessage: string | Record<string, any>, ...args: any[]) => {
+    if (!socketRef.current) return;
+    // Support legacy {type, ...rest} format from old WebSocket sendMessage calls
+    if (typeof eventOrMessage === 'object' && eventOrMessage.type) {
+      const { type, ...rest } = eventOrMessage;
+      socketRef.current.emit(type, rest);
+    } else {
+      socketRef.current.emit(eventOrMessage as string, ...args);
+    }
   }, []);
 
   return (

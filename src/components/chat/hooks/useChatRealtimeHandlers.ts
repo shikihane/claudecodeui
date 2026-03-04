@@ -1226,15 +1226,24 @@ export function useChatRealtimeHandlers({
 
     // Register all event listeners
     const events = [
-      'claude-response', 'claude-complete', 'claude-error',
-      'claude-permission-request', 'claude-status',
+      // Claude events
+      'claude-response', 'claude-output', 'claude-complete', 'claude-error',
+      'claude-permission-request', 'claude-permission-cancelled',
+      'claude-interactive-prompt', 'claude-status',
+      // Cursor events
+      'cursor-system', 'cursor-user', 'cursor-output', 'cursor-tool-use',
       'cursor-result', 'cursor-error',
-      'codex-complete', 'codex-error',
-      'session-created', 'session-aborted', 'session-auto-aborted',
+      // Codex events
+      'codex-response', 'codex-complete', 'codex-error',
+      // Session lifecycle
+      'session-created', 'session-aborted', 'session-auto-aborted', 'session-status',
+      // Background tasks
+      'bash-started', 'bash-completed', 'subagent-completed', 'subagent-progress',
+      'background-task-started', 'background-task-completed', 'background-task-deleted',
+      'task-output', 'task-killed',
+      // Other
       'projects_updated', 'taskmaster-project-updated',
-      'token-budget', 'background-task-completed', 'background-task-deleted',
-      'task-output', 'task-killed', 'session-status', 'active-sessions',
-      'pending-permissions'
+      'token-budget', 'active-sessions', 'pending-permissions',
     ];
 
     events.forEach(event => {

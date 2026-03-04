@@ -48,7 +48,6 @@ export default function AppContent() {
   } = useProjectsState({
     sessionId,
     navigate,
-    socket,
     isMobile,
     activeSessions,
   });
@@ -141,7 +140,6 @@ export default function AppContent() {
           selectedSession={selectedSession}
           activeTab={activeTab}
           setActiveTab={setActiveTab}
-          ws={ws}
           sendMessage={emit}
           isMobile={isMobile}
           onMenuClick={() => setSidebarOpen(true)}
