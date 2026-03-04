@@ -46,7 +46,7 @@ import pty from 'node-pty';
 import fetch from 'node-fetch';
 import mime from 'mime-types';
 
-import { connectedClients, ackEvent, syncPendingEvents } from './ws-clients.js';
+import { ackEvent, syncPendingEvents } from './ws-clients.js';
 import { setupRoomManagement, broadcastToAll, broadcastToSession } from './socket-rooms.js';
 import { setupHeartbeat } from './socket-heartbeat.js';
 import { getStateSnapshot } from './session-state.js';
@@ -208,7 +208,7 @@ const WATCHER_IGNORED_PATTERNS = [
 const WATCHER_DEBOUNCE_MS = 300;
 let projectsWatchers = [];
 let projectsWatcherDebounceTimer = null;
-// connectedClients is imported from ws-clients.js (shared with claude-sdk.js monitors)
+// NOTE: connectedClients removed - project updates now broadcast via Socket.IO
 let isGetProjectsRunning = false; // Flag to prevent reentrant calls
 
 // Broadcast progress to all connected WebSocket clients
@@ -1050,308 +1050,18 @@ wss.on('connection', (ws, request) => {
 
     if (pathname === '/shell') {
         handleShellConnection(ws);
-    } else if (pathname === '/ws') {
-        handleChatConnection(ws);
     } else {
-        console.log('[WARN] Unknown WebSocket path:', pathname);
+        console.log('[WARN] Unknown WebSocket path:', pathname, '- only /shell supported for raw WebSocket');
         ws.close();
     }
 });
 
-/**
- * WebSocket Writer - Wrapper for WebSocket to match SSEStreamWriter interface
- */
-class WebSocketWriter {
-  constructor(ws) {
-    this.ws = ws;
-    this.sessionId = null;
-    this.isWebSocketWriter = true;  // Marker for transport detection
-  }
+// NOTE: WebSocketWriter class removed - chat providers now use Socket.IO writer adapters
+// See server/socket-writer.js for Socket.IO-based writer implementations
 
-  send(data) {
-    if (this.ws.readyState === 1) { // WebSocket.OPEN
-      // Providers send raw objects, we stringify for WebSocket
-      this.ws.send(JSON.stringify(data));
-    } else {
-      console.warn('[WebSocketWriter] Cannot send message, WebSocket not open. ReadyState:', this.ws.readyState, 'Message type:', data.type);
-    }
-  }
-
-  updateWebSocket(newRawWs) {
-    this.ws = newRawWs;
-  }
-
-  setSessionId(sessionId) {
-    this.sessionId = sessionId;
-  }
-
-  getSessionId() {
-    return this.sessionId;
-  }
-}
-
-// Handle chat WebSocket connections
-function handleChatConnection(ws) {
-    console.log('[INFO] Chat WebSocket connected');
-
-    // Add to connected clients for project updates
-    connectedClients.add(ws);
-
-    // Wrap WebSocket with writer for consistent interface with SSEStreamWriter
-    const writer = new WebSocketWriter(ws);
-
-    ws.on('message', async (message) => {
-        try {
-            const data = JSON.parse(message);
-
-            if (data.type === 'claude-command') {
-                console.log('[DEBUG] User message:', data.command || '[Continue/Resume]');
-                console.log('📁 Project:', data.options?.projectPath || 'Unknown');
-                console.log('🔄 Session:', data.options?.sessionId ? 'Resume' : 'New');
-
-                // Use Claude Agents SDK
-                await queryClaudeSDK(data.command, data.options, writer);
-            } else if (data.type === 'cursor-command') {
-                console.log('[DEBUG] Cursor message:', data.command || '[Continue/Resume]');
-                console.log('📁 Project:', data.options?.cwd || 'Unknown');
-                console.log('🔄 Session:', data.options?.sessionId ? 'Resume' : 'New');
-                console.log('🤖 Model:', data.options?.model || 'default');
-                await spawnCursor(data.command, data.options, writer);
-            } else if (data.type === 'codex-command') {
-                console.log('[DEBUG] Codex message:', data.command || '[Continue/Resume]');
-                console.log('📁 Project:', data.options?.projectPath || data.options?.cwd || 'Unknown');
-                console.log('🔄 Session:', data.options?.sessionId ? 'Resume' : 'New');
-                console.log('🤖 Model:', data.options?.model || 'default');
-                await queryCodex(data.command, data.options, writer);
-            } else if (data.type === 'cursor-resume') {
-                // Backward compatibility: treat as cursor-command with resume and no prompt
-                console.log('[DEBUG] Cursor resume session (compat):', data.sessionId);
-                await spawnCursor('', {
-                    sessionId: data.sessionId,
-                    resume: true,
-                    cwd: data.options?.cwd
-                }, writer);
-            } else if (data.type === 'abort-session') {
-                console.log('[DEBUG] Abort session request:', data.sessionId);
-                const provider = data.provider || 'claude';
-                let success;
-
-                if (provider === 'cursor') {
-                    success = abortCursorSession(data.sessionId);
-                } else if (provider === 'codex') {
-                    success = abortCodexSession(data.sessionId);
-                } else {
-                    // Use Claude Agents SDK
-                    success = await abortClaudeSDKSession(data.sessionId);
-                }
-
-                writer.send({
-                    type: 'session-aborted',
-                    sessionId: data.sessionId,
-                    provider,
-                    success
-                });
-            } else if (data.type === 'claude-permission-response') {
-                // Relay UI approval decisions back into the SDK control flow.
-                // This does not persist permissions; it only resolves the in-flight request,
-                // introduced so the SDK can resume once the user clicks Allow/Deny.
-                console.log('[PERMISSION] Received permission response from frontend:', {
-                    requestId: data.requestId,
-                    allow: data.allow,
-                    rememberEntry: data.rememberEntry
-                });
-                if (data.requestId) {
-                    resolveToolApproval(data.requestId, {
-                        allow: Boolean(data.allow),
-                        updatedInput: data.updatedInput,
-                        message: data.message,
-                        rememberEntry: data.rememberEntry
-                    });
-                } else {
-                    console.log('[PERMISSION] ERROR: No requestId in permission response');
-                }
-            } else if (data.type === 'cursor-abort') {
-                console.log('[DEBUG] Abort Cursor session:', data.sessionId);
-                const success = abortCursorSession(data.sessionId);
-                writer.send({
-                    type: 'session-aborted',
-                    sessionId: data.sessionId,
-                    provider: 'cursor',
-                    success
-                });
-            } else if (data.type === 'check-session-status') {
-                // Check if a specific session is currently processing
-                const provider = data.provider || 'claude';
-                const sessionId = data.sessionId;
-                let isActive;
-
-                if (provider === 'cursor') {
-                    isActive = isCursorSessionActive(sessionId);
-                } else if (provider === 'codex') {
-                    isActive = isCodexSessionActive(sessionId);
-                } else {
-                    // Use Claude Agents SDK
-                    isActive = isClaudeSDKSessionActive(sessionId);
-                    if (isActive) {
-                        // Reconnect the session's writer to the new WebSocket so
-                        // subsequent SDK output flows to the refreshed client.
-                        reconnectSessionWriter(sessionId, ws);
-                    }
-                }
-
-                writer.send({
-                    type: 'session-status',
-                    sessionId,
-                    provider,
-                    isProcessing: isActive
-                });
-            } else if (data.type === 'get-active-sessions') {
-                // Get all currently active sessions
-                const activeSessions = {
-                    claude: getActiveClaudeSDKSessions(),
-                    cursor: getActiveCursorSessions(),
-                    codex: getActiveCodexSessions()
-                };
-                writer.send({
-                    type: 'active-sessions',
-                    sessions: activeSessions
-                });
-            } else if (data.type === 'get-pending-permissions') {
-                // Query pending permission requests for a session
-                const sessionId = data.sessionId;
-                const pending = getPendingApprovalsForSession(sessionId);
-
-                writer.send({
-                    type: 'pending-permissions',
-                    sessionId,
-                    data: pending
-                });
-            } else if (data.type === 'kill-background-task') {
-                // TODO: This only removes the task from tracking, it does NOT actually kill the underlying process.
-                // The Claude Agent SDK (as of v0.1.71) does not expose an API to terminate individual background tasks.
-                // SDK only provides Query.interrupt() which kills the entire session, not a single task.
-                // CLI internally uses AbortController for each task, but this is not exposed through the SDK protocol.
-                //
-                // Tracking issues:
-                // - https://github.com/anthropics/claude-code/issues/9905 (Background Agent Execution)
-                // - https://github.com/anthropics/claude-code/issues/7069 (Native Background Task Management)
-                // - https://github.com/anthropics/claude-agent-sdk-typescript/issues/120 (V2 API interrupt)
-                //
-                // Current behavior: "Dismiss" the task from UI, but it continues running in the background.
-                // Future: When SDK adds killTask(taskId) API, implement actual process termination here.
-
-                const taskId = data.taskId;
-                const task = backgroundTasks.get(taskId);
-                if (task) {
-                    task.status = 'completed';
-                    task.endTime = Date.now();
-                    backgroundTasks.delete(taskId);
-                }
-                writer.send({
-                    type: 'background-task-deleted',
-                    taskId,
-                    success: !!task
-                });
-            } else if (data.type === 'query-task-output') {
-                const taskId = data.taskId;
-                const maxLines = data.maxLines || 200;
-
-                const entry = backgroundTaskOutputs.get(taskId);
-                let rawOutput = '';
-
-                if (entry && entry.type === 'file') {
-                    try {
-                        rawOutput = await fsPromises.readFile(entry.path, 'utf-8');
-                    } catch (err) {
-                        // Fallback to CLI response if file read fails
-                        rawOutput = entry.cliResponse || '';
-                    }
-                } else if (entry && entry.type === 'inline') {
-                    rawOutput = entry.content;
-                }
-
-                const result = rawOutput ? truncateOutput(rawOutput, maxLines) : {
-                    content: '',
-                    truncated: false,
-                    totalLines: 0
-                };
-
-                writer.send({
-                    type: 'task-output',
-                    taskId,
-                    output: result
-                });
-            } else if (data.type === 'sync-background-events') {
-                // Client (re)connected and wants all un-ACK'd task events for its session
-                const sessionId = data.sessionId;
-                if (sessionId) {
-                    syncPendingEvents(sessionId, ws);
-                }
-            } else if (data.type === 'ack-event') {
-                // Client confirms receipt of a task event
-                if (data.sessionId && data.eventId) {
-                    ackEvent(data.sessionId, data.eventId);
-                }
-            } else if (data.type === 'kill-task') {
-                const taskId = data.taskId;
-                const task = backgroundTasks.get(taskId);
-                const entry = backgroundTaskOutputs.get(taskId);
-
-                if (!task && !entry) {
-                    writer.send({
-                        type: 'task-killed',
-                        taskId,
-                        success: false,
-                        error: 'Task not found'
-                    });
-                    return;
-                }
-
-                // Get command text from task or entry
-                const commandText = task?.input?.command || entry?.command || '';
-
-                if (!commandText) {
-                    writer.send({
-                        type: 'task-killed',
-                        taskId,
-                        success: false,
-                        error: 'Command text not available'
-                    });
-                    return;
-                }
-
-                // Try to kill the process
-                const result = await killBackgroundProcess(commandText);
-
-                // Update task status if found
-                if (task) {
-                    task.status = 'completed';
-                    task.endTime = Date.now();
-                }
-
-                writer.send({
-                    type: 'task-killed',
-                    taskId,
-                    success: result.success,
-                    pids: result.pids,
-                    error: result.error
-                });
-            }
-        } catch (error) {
-            console.error('[ERROR] Chat WebSocket error:', error.message);
-            writer.send({
-                type: 'error',
-                error: error.message
-            });
-        }
-    });
-
-    ws.on('close', () => {
-        console.log('🔌 Chat client disconnected');
-        // Remove from connected clients
-        connectedClients.delete(ws);
-    });
-}
+// NOTE: handleChatConnection removed - chat now uses Socket.IO instead of raw WebSocket
+// All chat communication (claude-command, cursor-command, etc.) now handled via Socket.IO events
+// Only /shell path uses raw WebSocket for terminal communication
 
 // Handle shell WebSocket connections
 function handleShellConnection(ws) {
