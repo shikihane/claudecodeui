@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useWebSocket } from '../../contexts/WebSocketContext';
+import { useSocketIO } from '../../contexts/SocketIOContext';
 
 type BackgroundTask = {
   taskId: string;
@@ -36,7 +36,7 @@ export default function BackgroundTasksPage({ currentSessionId }: { currentSessi
   const [tasks, setTasks] = useState<BackgroundTask[]>([]);
   const [bashTasks, setBashTasks] = useState<BashTask[]>([]);
   const [taskOutputs, setTaskOutputs] = useState<Map<string, TaskOutput>>(new Map());
-  const { sendMessage, subscribe } = useWebSocket();
+  const { emit, socket } = useSocketIO();
 
   const isMobile = useMemo(() => window.innerWidth < 768, []);
   const maxLines = useMemo(() => isMobile ? 50 : 200, [isMobile]);
@@ -52,21 +52,23 @@ export default function BackgroundTasksPage({ currentSessionId }: { currentSessi
 
     // Query immediately
     runningIds.forEach(id => {
-      sendMessage({ type: 'query-task-output', taskId: id, maxLines });
+      emit('query-task-output', { taskId: id, maxLines });
     });
 
     const interval = setInterval(() => {
       runningIds.forEach(id => {
-        sendMessage({ type: 'query-task-output', taskId: id, maxLines });
+        emit('query-task-output', { taskId: id, maxLines });
       });
     }, 5000);
 
     return () => clearInterval(interval);
-  }, [tasks, bashTasks, sendMessage, maxLines]);
+  }, [tasks, bashTasks, emit, maxLines]);
 
   // Listen for task events
   useEffect(() => {
-    return subscribe((msg: any) => {
+    if (!socket) return;
+
+    const handleTaskEvent = (msg: any) => {
       if (msg.type === 'background-task-started') {
         setTasks(prev => [...prev, msg.task]);
       }
@@ -121,12 +123,31 @@ export default function BackgroundTasksPage({ currentSessionId }: { currentSessi
           );
         }
       }
+    };
+
+    // Register event listeners for background task events
+    const events = [
+      'background-task-started',
+      'background-task-completed',
+      'background-task-deleted',
+      'task-output',
+      'task-killed'
+    ];
+
+    events.forEach(event => {
+      socket.on(event, handleTaskEvent);
     });
-  }, [subscribe]);
+
+    return () => {
+      events.forEach(event => {
+        socket.off(event, handleTaskEvent);
+      });
+    };
+  }, [socket]);
 
   const handleDeleteTask = (taskId: string, status: string) => {
     if (status === 'running') {
-      sendMessage({ type: 'kill-task', taskId });
+      emit('kill-task', { taskId });
       setTasks(prev =>
         prev.map(task =>
           task.taskId === taskId ? { ...task, status: 'terminating' as const } : task
@@ -144,7 +165,7 @@ export default function BackgroundTasksPage({ currentSessionId }: { currentSessi
 
   const handleDeleteBash = (bashId: string, status?: string) => {
     if (status === 'running') {
-      sendMessage({ type: 'kill-task', taskId: bashId });
+      emit('kill-task', { taskId: bashId });
       setBashTasks(prev =>
         prev.map(bash => (bash.id === bashId ? { ...bash, status: 'terminating' as const } : bash))
       );

@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
 import { api } from '../utils/api';
 import { useAuth } from './AuthContext';
-import { useWebSocket } from './WebSocketContext';
+import { useSocketIO } from './SocketIOContext';
 
 const TaskMasterContext = createContext({
   // TaskMaster project state
@@ -42,7 +42,7 @@ export const useTaskMaster = () => {
 
 export const TaskMasterProvider = ({ children }) => {
   // Get WebSocket messages from shared context to avoid duplicate connections
-  const { latestMessage } = useWebSocket();
+  const { socket } = useSocketIO();
   
   // Authentication context
   const { user, token, isLoading: authLoading } = useAuth();
@@ -238,36 +238,50 @@ export const TaskMasterProvider = ({ children }) => {
     }
   }, [currentProject?.name, user, token, refreshTasks]);
 
-  // Handle WebSocket latestMessage for TaskMaster updates
+  // Handle Socket.IO events for TaskMaster updates
   useEffect(() => {
-    if (!latestMessage) return;
+    if (!socket) return;
 
+    const handleTaskMasterEvent = (data) => {
+      switch (data.type || data.event) {
+        case 'taskmaster-project-updated':
+          // Refresh projects when TaskMaster state changes
+          if (data.projectName) {
+            refreshProjects();
+          }
+          break;
 
-    switch (latestMessage.type) {
-      case 'taskmaster-project-updated':
-        // Refresh projects when TaskMaster state changes
-        if (latestMessage.projectName) {
-          refreshProjects();
-        }
-        break;
-        
-      case 'taskmaster-tasks-updated':
-        // Refresh tasks for the current project
-        if (latestMessage.projectName === currentProject?.name) {
-          refreshTasks();
-        }
-        break;
-        
-      case 'taskmaster-mcp-status-changed':
-        // Refresh MCP server status
-        refreshMCPStatus();
-        break;
-        
-      default:
-        // Ignore non-TaskMaster messages
-        break;
-    }
-  }, [latestMessage, refreshProjects, refreshTasks, refreshMCPStatus, currentProject]);
+        case 'taskmaster-tasks-updated':
+          // Refresh tasks for the current project
+          if (data.projectName === currentProject?.name) {
+            refreshTasks();
+          }
+          break;
+
+        case 'taskmaster-mcp-status-changed':
+          // Refresh MCP server status
+          refreshMCPStatus();
+          break;
+      }
+    };
+
+    // Register TaskMaster event listeners
+    const events = [
+      'taskmaster-project-updated',
+      'taskmaster-tasks-updated',
+      'taskmaster-mcp-status-changed'
+    ];
+
+    events.forEach(event => {
+      socket.on(event, handleTaskMasterEvent);
+    });
+
+    return () => {
+      events.forEach(event => {
+        socket.off(event, handleTaskMasterEvent);
+      });
+    };
+  }, [socket, refreshProjects, refreshTasks, refreshMCPStatus, currentProject]);
 
   // Context value
   const contextValue = {

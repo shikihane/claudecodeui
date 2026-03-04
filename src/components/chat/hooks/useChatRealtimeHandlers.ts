@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react';
 import type { Dispatch, MutableRefObject, SetStateAction } from 'react';
 import { decodeHtmlEntities, formatUsageLimitText } from '../utils/chatFormatting';
 import { safeLocalStorage } from '../utils/chatStorage';
-import { useWebSocket } from '../../../contexts/WebSocketContext';
+import { useSocketIO } from '../../../contexts/SocketIOContext';
 import type { ChatMessage, PendingPermissionRequest } from '../types/types';
 import type { Project, ProjectSession, SessionProvider } from '../../../types/app';
 
@@ -154,7 +154,7 @@ export function useChatRealtimeHandlers({
   const seenTaskEventsRef = useRef(new Set<string>());
 
   // Reset UI state when WebSocket disconnects
-  const { isConnected, subscribe } = useWebSocket();
+  const { isConnected, socket } = useSocketIO();
 
   useEffect(() => {
     if (!isConnected) {
@@ -1214,13 +1214,39 @@ export function useChatRealtimeHandlers({
     }
   };
 
-  // Subscribe to WebSocket messages via synchronous callback — guaranteed lossless
-  // delivery. Unlike the React state-based `latestMessage` path, the subscribe
-  // callback fires synchronously for every message, bypassing React 18's automatic
+  // Subscribe to Socket.IO events via event listeners — guaranteed lossless
+  // delivery. Socket.IO events fire synchronously for every message, bypassing React 18's automatic
   // batching which can coalesce rapid state updates and skip intermediate values.
   useEffect(() => {
-    return subscribe((message: any) => {
-      handleMessageRef.current?.(message);
+    if (!socket) return;
+
+    const handleMessage = (data: any) => {
+      handleMessageRef.current?.(data);
+    };
+
+    // Register all event listeners
+    const events = [
+      'claude-response', 'claude-complete', 'claude-error',
+      'claude-permission-request', 'claude-status',
+      'cursor-result', 'cursor-error',
+      'codex-complete', 'codex-error',
+      'session-created', 'session-aborted', 'session-auto-aborted',
+      'projects_updated', 'taskmaster-project-updated',
+      'token-budget', 'background-task-completed', 'background-task-deleted',
+      'task-output', 'task-killed', 'session-status', 'active-sessions',
+      'pending-permissions'
+    ];
+
+    events.forEach(event => {
+      socket.on(event, (data) => {
+        handleMessage({ type: event, ...data });
+      });
     });
-  }, [subscribe]);
+
+    return () => {
+      events.forEach(event => {
+        socket.off(event);
+      });
+    };
+  }, [socket]);
 }

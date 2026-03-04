@@ -6,7 +6,7 @@ import Sidebar from '../sidebar/view/Sidebar';
 import MainContent from '../main-content/view/MainContent';
 import MobileNav from '../MobileNav';
 
-import { useWebSocket } from '../../contexts/WebSocketContext';
+import { useSocketIO } from '../../contexts/SocketIOContext';
 import { useDeviceSettings } from '../../hooks/useDeviceSettings';
 import { useSessionProtection } from '../../hooks/useSessionProtection';
 import { useProjectsState } from '../../hooks/useProjectsState';
@@ -17,7 +17,7 @@ export default function AppContent() {
   const { sessionId } = useParams<{ sessionId?: string }>();
   const { t } = useTranslation('common');
   const { isMobile } = useDeviceSettings({ trackPWA: false });
-  const { ws, sendMessage, latestMessage, isConnected } = useWebSocket();
+  const { socket, emit, isConnected } = useSocketIO();
   const wasConnectedRef = useRef(false);
 
   const {
@@ -48,7 +48,7 @@ export default function AppContent() {
   } = useProjectsState({
     sessionId,
     navigate,
-    latestMessage,
+    socket,
     isMobile,
     activeSessions,
   });
@@ -93,12 +93,12 @@ export default function AppContent() {
       } else {
         console.log('🔄 Session changed, querying pending permissions for session:', selectedSession.id);
       }
-      sendMessage({
+      emit('get-active-sessions', {
         type: 'get-pending-permissions',
         sessionId: selectedSession.id
       });
     }
-  }, [isConnected, selectedSession?.id, sendMessage]);
+  }, [isConnected, selectedSession?.id, emit]);
 
   return (
     <div className="fixed inset-0 flex bg-background">
@@ -142,7 +142,7 @@ export default function AppContent() {
           activeTab={activeTab}
           setActiveTab={setActiveTab}
           ws={ws}
-          sendMessage={sendMessage}
+          sendMessage={emit}
           isMobile={isMobile}
           onMenuClick={() => setSidebarOpen(true)}
           isLoading={isLoadingProjects}

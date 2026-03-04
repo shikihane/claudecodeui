@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useWebSocket } from '../../contexts/WebSocketContext';
+import { useSocketIO } from '../../contexts/SocketIOContext';
 
 type BackgroundTask = {
   taskId: string;
@@ -47,16 +47,16 @@ export default function BackgroundTasksPopover({ currentSessionId }: { currentSe
   const [tasks, setTasks] = useState<BackgroundTask[]>([]);
   const [bashTasks, setBashTasks] = useState<BashTask[]>([]);
   const [taskOutputs, setTaskOutputs] = useState<Map<string, TaskOutput>>(new Map());
-  const { sendMessage, subscribe, isConnected } = useWebSocket();
+  const { emit, socket, isConnected } = useSocketIO();
 
   // On WebSocket (re)connect, request all un-ACK'd events for this session
   const prevConnectedRef = useRef(false);
   useEffect(() => {
     if (isConnected && !prevConnectedRef.current && currentSessionId) {
-      sendMessage({ type: 'sync-background-events', sessionId: currentSessionId });
+      emit('sync-background-events', { sessionId: currentSessionId });
     }
     prevConnectedRef.current = isConnected;
-  }, [isConnected, currentSessionId, sendMessage]);
+  }, [isConnected, currentSessionId, emit]);
 
   const isMobile = useMemo(() => window.innerWidth < 768, []);
   const maxLines = useMemo(() => isMobile ? 50 : 200, [isMobile]);
@@ -73,27 +73,29 @@ export default function BackgroundTasksPopover({ currentSessionId }: { currentSe
     if (runningIds.length === 0) return;
 
     runningIds.forEach(id => {
-      sendMessage({ type: 'query-task-output', taskId: id, maxLines });
+      emit('query-task-output', { taskId: id, maxLines });
     });
 
     const interval = setInterval(() => {
       runningIds.forEach(id => {
-        sendMessage({ type: 'query-task-output', taskId: id, maxLines });
+        emit('query-task-output', { taskId: id, maxLines });
       });
     }, 5000);
 
     return () => clearInterval(interval);
-  }, [tasks, bashTasks, sendMessage, maxLines, isOpen]);
+  }, [tasks, bashTasks, emit, maxLines, isOpen]);
 
   // Deduplication set for at-least-once delivered events
   const seenEventsRef = useRef(new Set<string>());
 
   // Listen for task events - ALWAYS subscribed (not conditional on isOpen)
   useEffect(() => {
-    return subscribe((msg: any) => {
+    if (!socket) return;
+
+    const handleTaskEvent = (msg: any) => {
       // At-least-once: ACK receipt and deduplicate
       if (msg.eventId) {
-        sendMessage({ type: 'ack-event', eventId: msg.eventId, sessionId: msg.sessionId });
+        emit('ack-event', { eventId: msg.eventId, sessionId: msg.sessionId });
         if (seenEventsRef.current.has(msg.eventId)) return; // already processed
         seenEventsRef.current.add(msg.eventId);
         // Cap the set to prevent unbounded growth
@@ -174,7 +176,7 @@ export default function BackgroundTasksPopover({ currentSessionId }: { currentSe
         );
         // Fetch final output once on completion
         if (msg.bash?.id) {
-          sendMessage({ type: 'query-task-output', taskId: msg.bash.id, maxLines });
+          emit('query-task-output', { taskId: msg.bash.id, maxLines });
         }
       }
 
@@ -204,8 +206,27 @@ export default function BackgroundTasksPopover({ currentSessionId }: { currentSe
           );
         }
       }
+    };
+
+    // Register event listeners for background task events
+    const events = [
+      'background-task-started',
+      'background-task-completed',
+      'background-task-deleted',
+      'task-output',
+      'task-killed'
+    ];
+
+    events.forEach(event => {
+      socket.on(event, handleTaskEvent);
     });
-  }, [subscribe]);
+
+    return () => {
+      events.forEach(event => {
+        socket.off(event, handleTaskEvent);
+      });
+    };
+  }, [socket, emit]);
 
   const sessionTasks = currentSessionId
     ? tasks.filter(t => t.sessionId === currentSessionId)
@@ -219,7 +240,7 @@ export default function BackgroundTasksPopover({ currentSessionId }: { currentSe
 
   const handleDeleteTask = (taskId: string, status: string) => {
     if (status === 'running' || status === 'monitoring') {
-      sendMessage({ type: 'kill-task', taskId });
+      emit('kill-task', { taskId });
       setTasks(prev => prev.map(task =>
         task.taskId === taskId
           ? { ...task, status: 'terminating' as const }
@@ -237,7 +258,7 @@ export default function BackgroundTasksPopover({ currentSessionId }: { currentSe
 
   const handleDeleteBash = (bashId: string, status?: string) => {
     if (status === 'running') {
-      sendMessage({ type: 'kill-task', taskId: bashId });
+      emit('kill-task', { taskId: bashId });
       setBashTasks(prev => prev.map(bash =>
         bash.id === bashId
           ? { ...bash, status: 'terminating' as const }
