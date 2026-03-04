@@ -213,15 +213,7 @@ let isGetProjectsRunning = false; // Flag to prevent reentrant calls
 
 // Broadcast progress to all connected WebSocket clients
 function broadcastProgress(progress) {
-    const message = JSON.stringify({
-        type: 'loading_progress',
-        ...progress
-    });
-    connectedClients.forEach(client => {
-        if (client.readyState === WebSocket.OPEN) {
-            client.send(message);
-        }
-    });
+    broadcastToAll(io, 'loading_progress', progress);
 }
 
 // Setup file system watchers for Claude, Cursor, and Codex project/session folders
@@ -265,20 +257,15 @@ async function setupProjectsWatcher() {
                 const updatedProjects = await getProjects(broadcastProgress);
 
                 // Notify all connected clients about the project changes
-                const updateMessage = JSON.stringify({
-                    type: 'projects_updated',
+                const data = {
                     projects: updatedProjects,
                     timestamp: new Date().toISOString(),
                     changeType: eventType,
                     changedFile: path.relative(rootPath, filePath),
                     watchProvider: provider
-                });
+                };
 
-                connectedClients.forEach(client => {
-                    if (client.readyState === WebSocket.OPEN) {
-                        client.send(updateMessage);
-                    }
-                });
+                broadcastToAll(io, 'projects_updated', data);
 
             } catch (error) {
                 console.error('[ERROR] Error handling project changes:', error);

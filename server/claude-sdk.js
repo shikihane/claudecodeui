@@ -21,6 +21,7 @@ import path from 'path';
 import os from 'os';
 import { CLAUDE_MODELS } from '../shared/modelConstants.js';
 import { emitTaskEvent } from './ws-clients.js';
+import { addStreamingChunk, finalizeStreamingMessage, addPendingPermission, removePendingPermission } from './session-state.js';
 
 const activeSessions = new Map();
 const pendingToolApprovals = new Map();
@@ -514,6 +515,12 @@ function resolveToolApproval(requestId, decision) {
   const approval = pendingToolApprovals.get(requestId);
   if (approval && approval.resolve) {
     console.log(`[PERMISSION] Resolving approval for requestId: ${requestId}, decision:`, decision);
+
+    // Remove pending permission from session state
+    if (approval.sessionId) {
+      removePendingPermission(approval.sessionId, requestId);
+    }
+
     approval.resolve(decision);
   } else {
     console.log(`[PERMISSION] No pending approval found for requestId: ${requestId}`);
@@ -1027,6 +1034,9 @@ async function queryClaudeSDK(command, options = {}, ws) {
       const requestId = createRequestId();
       console.log(`[PERMISSION] Sending permission request for ${toolName}, requestId: ${requestId}, sessionId: ${capturedSessionId || sessionId || null}`);
 
+      // Add pending permission to session state
+      addPendingPermission(capturedSessionId || sessionId, { requestId, toolName, input });
+
       ws.send({
         type: 'claude-permission-request',
         requestId,
@@ -1136,6 +1146,16 @@ async function queryClaudeSDK(command, options = {}, ws) {
 
       // Transform and send message to WebSocket
       const transformedMessage = transformMessage(message);
+
+      // Accumulate streaming text chunks for session state
+      if (transformedMessage && transformedMessage.content) {
+        for (const contentBlock of transformedMessage.content || []) {
+          if (contentBlock.type === 'text' && contentBlock.text) {
+            addStreamingChunk(capturedSessionId || sessionId, contentBlock.text);
+          }
+        }
+      }
+
       ws.send({
         type: 'claude-response',
         data: transformedMessage,
@@ -1310,6 +1330,9 @@ async function queryClaudeSDK(command, options = {}, ws) {
 
       // Extract and send token budget updates from result messages
       if (message.type === 'result') {
+        // Finalize streaming message when result is received
+        finalizeStreamingMessage(capturedSessionId || sessionId);
+
         const tokenBudget = extractTokenBudget(message);
         if (tokenBudget) {
           console.log('Token budget from modelUsage:', tokenBudget);
