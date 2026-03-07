@@ -6,14 +6,59 @@
  * This adapter converts that to socket.emit(type, {sessionId, data, ...rest}).
  */
 export function createSocketWriter(socket) {
-  return {
+  let socketRef = socket;
+  let sessionId = null;
+  const buffer = [];
+  const MAX_BUFFER_SIZE = 500;
+
+  function flush() {
+    if (!socketRef || !socketRef.connected) return;
+    while (buffer.length > 0) {
+      const { type, rest } = buffer.shift();
+      socketRef.emit(type, rest);
+    }
+  }
+
+  const writer = {
     isWebSocketWriter: true,
+
     send(msg) {
       if (!msg || !msg.type) return;
       const { type, ...rest } = msg;
-      socket.emit(type, rest);
+      if (sessionId) rest.sessionId = rest.sessionId || sessionId;
+
+      if (socketRef && socketRef.connected) {
+        socketRef.emit(type, rest);
+      } else {
+        if (buffer.length < MAX_BUFFER_SIZE) {
+          buffer.push({ type, rest });
+        }
+      }
+    },
+
+    updateSocket(newSocket) {
+      socketRef = newSocket;
+      flush();
+    },
+
+    detach() {
+      socketRef = null;
+    },
+
+    setSessionId(id) {
+      sessionId = id;
+    },
+
+    getSessionId() {
+      return sessionId;
+    },
+
+    getBufferSize() {
+      return buffer.length;
     }
   };
+
+  return writer;
 }
 
 export function createBroadcastWriter(io, room = null) {
