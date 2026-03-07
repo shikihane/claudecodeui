@@ -158,9 +158,14 @@ export function useChatRealtimeHandlers({
 
   useEffect(() => {
     if (!isConnected) {
-      setIsLoading(false);
-      setCanAbortSession(false);
-      setClaudeStatus(null);
+      // Don't reset streaming UI state if we have an active session that may reconnect.
+      // The reconnect-session handler will restore correct state.
+      const hasActiveSession = !!sessionStorage.getItem('socketio-active-session');
+      if (!hasActiveSession) {
+        setIsLoading(false);
+        setCanAbortSession(false);
+        setClaudeStatus(null);
+      }
       // DO NOT clear pendingPermissionRequests here - they are persisted to localStorage
       // and should survive WebSocket reconnections. Users may switch tabs or lose connection
       // while a permission request is pending, and we need to preserve it.
