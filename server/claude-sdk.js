@@ -1141,7 +1141,7 @@ async function queryClaudeSDK(command, options = {}, ws) {
           console.log('Not sending session-created. sessionId:', sessionId, 'sessionCreatedSent:', sessionCreatedSent);
         }
       } else {
-        console.log('No session_id in message or already captured. message.session_id:', message.session_id, 'capturedSessionId:', capturedSessionId);
+        // session_id already captured, normal for all subsequent messages
       }
 
       // Transform and send message to WebSocket
