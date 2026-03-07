@@ -25,7 +25,9 @@
   },
   "scripts": {
     "dev": "concurrently --kill-others \"npm run server\" \"npm run client\"",
+    "dev:local": "concurrently --kill-others \"npm run server:local\" \"npm run client\"",
     "server": "node server/index.js",
+    "server:local": "node --env-file=.env.development.local server/index.js",
     "client": "vite --host",
     "build": "vite build",
     "preview": "vite preview",
