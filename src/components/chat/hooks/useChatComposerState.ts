@@ -25,6 +25,7 @@ import { useFileMentions } from './useFileMentions';
 import { type SlashCommand, useSlashCommands } from './useSlashCommands';
 import type { Project, ProjectSession, SessionProvider } from '../../../types/app';
 import { escapeRegExp } from '../utils/chatFormatting';
+import { useSocketIO } from '../../../contexts/SocketIOContext';
 
 type PendingViewSession = {
   sessionId: string | null;
@@ -115,6 +116,8 @@ export function useChatComposerState({
   setIsUserScrolledUp,
   setPendingPermissionRequests,
 }: UseChatComposerStateArgs) {
+  const { setActiveSession } = useSocketIO();
+
   const [input, setInput] = useState(() => {
     if (typeof window !== 'undefined' && selectedProject) {
       return safeLocalStorage.getItem(`draft_input_${selectedProject.name}`) || '';
@@ -805,6 +808,9 @@ export function useChatComposerState({
           },
         });
       }
+
+      // Persist active session for reconnect on refresh
+      setActiveSession(effectiveSessionId, provider);
 
       setInput('');
       inputValueRef.current = '';

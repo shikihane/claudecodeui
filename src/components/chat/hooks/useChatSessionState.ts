@@ -5,6 +5,7 @@ import { api, authenticatedFetch } from '../../../utils/api';
 import type { ChatMessage, Provider } from '../types/types';
 import type { Project, ProjectSession } from '../../../types/app';
 import { safeLocalStorage } from '../utils/chatStorage';
+import { useSocketIO } from '../../../contexts/SocketIOContext';
 import {
   convertCursorSessionMessages,
   convertSessionMessages,
@@ -46,6 +47,8 @@ export function useChatSessionState({
   resetStreamingState,
   pendingViewSessionRef,
 }: UseChatSessionStateArgs) {
+  const { setActiveSession } = useSocketIO();
+
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>(() => {
     if (typeof window !== 'undefined' && selectedProject) {
       const saved = safeLocalStorage.getItem(`chat_messages_${selectedProject.name}`);
@@ -328,6 +331,7 @@ export function useChatSessionState({
 
         const sessionChanged = currentSessionId !== null && currentSessionId !== selectedSession.id;
         if (sessionChanged) {
+          setActiveSession(null);
           if (!isSystemSessionChange) {
             resetStreamingState();
             pendingViewSessionRef.current = null;
