@@ -154,7 +154,7 @@ export function useChatRealtimeHandlers({
   const seenTaskEventsRef = useRef(new Set<string>());
 
   // Reset UI state when WebSocket disconnects
-  const { isConnected, socket } = useSocketIO();
+  const { isConnected, socket, setActiveSession, lastReconnectResult } = useSocketIO();
 
   useEffect(() => {
     if (!isConnected) {
@@ -167,6 +167,36 @@ export function useChatRealtimeHandlers({
       // setPendingPermissionRequests([]);
     }
   }, [isConnected, setIsLoading, setCanAbortSession, setClaudeStatus]);
+
+  // Handle session reconnect result — restore state from server snapshot
+  useEffect(() => {
+    if (!lastReconnectResult) return;
+    const { isActive, snapshot, writerSwapped } = lastReconnectResult;
+
+    if (isActive && snapshot) {
+      // Restore pending permissions
+      if (snapshot.pendingPermissions?.length > 0) {
+        setPendingPermissionRequests(snapshot.pendingPermissions);
+      }
+
+      // Restore streaming state
+      if (snapshot.status === 'streaming' || snapshot.status === 'awaiting_permission') {
+        setIsLoading(true);
+        setCanAbortSession(true);
+      }
+
+      // Restore token budget
+      if (snapshot.tokenBudget) {
+        setTokenBudget(snapshot.tokenBudget);
+      }
+
+      console.log('[Reconnect] State restored:', {
+        status: snapshot.status,
+        pendingPermissions: snapshot.pendingPermissions?.length,
+        writerSwapped
+      });
+    }
+  }, [lastReconnectResult]);
 
   // Message handler ref — updated every render so the callback always sees latest
   // closure values (provider, selectedProject, currentSessionId, etc.).
@@ -288,6 +318,7 @@ export function useChatRealtimeHandlers({
       case 'session-created':
         if (latestMessage.sessionId && !currentSessionId) {
           sessionStorage.setItem('pendingSessionId', latestMessage.sessionId);
+          setActiveSession(latestMessage.sessionId, provider);
           if (pendingViewSessionRef.current && !pendingViewSessionRef.current.sessionId) {
             pendingViewSessionRef.current.sessionId = latestMessage.sessionId;
           }
@@ -804,6 +835,7 @@ export function useChatRealtimeHandlers({
             setTimeout(() => window.refreshProjects?.(), 500);
           }
         }
+        setActiveSession(null);
         break;
       }
 
@@ -935,6 +967,7 @@ export function useChatRealtimeHandlers({
           safeLocalStorage.removeItem(`chat_messages_${selectedProject.name}`);
         }
         setPendingPermissionRequests([]);
+        setActiveSession(null);
         break;
       }
 
@@ -1099,6 +1132,7 @@ export function useChatRealtimeHandlers({
         if (selectedProject) {
           safeLocalStorage.removeItem(`chat_messages_${selectedProject.name}`);
         }
+        setActiveSession(null);
         break;
       }
 
