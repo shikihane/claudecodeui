@@ -371,6 +371,57 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Session reconnection (browser refresh while streaming)
+  socket.on('reconnect-session', (data, ack) => {
+    const { sessionId, provider } = data || {};
+    if (!sessionId) {
+      if (typeof ack === 'function') ack({ success: false, reason: 'no sessionId' });
+      return;
+    }
+
+    console.log(`[Socket.IO] reconnect-session: ${sessionId} from socket ${socket.id}`);
+
+    // Join the session room
+    socket.join(sessionId);
+
+    // Try to swap the writer for active Claude sessions
+    let writerSwapped = false;
+    if (!provider || provider === 'claude') {
+      writerSwapped = reconnectSessionWriter(sessionId, socket);
+    }
+
+    // Get current state snapshot
+    const snapshot = getStateSnapshot(sessionId);
+
+    // Check if session is still active
+    let isActive = false;
+    if (provider === 'cursor') {
+      isActive = isCursorSessionActive(sessionId);
+    } else if (provider === 'codex') {
+      isActive = isCodexSessionActive(sessionId);
+    } else {
+      isActive = isClaudeSDKSessionActive(sessionId);
+    }
+
+    const result = {
+      success: true,
+      writerSwapped,
+      isActive,
+      snapshot
+    };
+
+    console.log(`[Socket.IO] reconnect-session result:`, {
+      sessionId,
+      writerSwapped,
+      isActive,
+      status: snapshot.status,
+      pendingPermissions: snapshot.pendingPermissions?.length || 0,
+      bufferedMessages: 'flushed via writer'
+    });
+
+    if (typeof ack === 'function') ack(result);
+  });
+
   // Chat command handlers
   socket.on('claude-command', async (data) => {
     console.log('[Socket.IO] claude-command received, session:', data.options?.sessionId);

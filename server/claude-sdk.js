@@ -1477,11 +1477,11 @@ function getPendingApprovalsForSession(sessionId) {
  * @param {Object} newRawWs - The new raw WebSocket connection
  * @returns {boolean} True if writer was successfully reconnected
  */
-function reconnectSessionWriter(sessionId, newRawWs) {
+function reconnectSessionWriter(sessionId, newSocket) {
   const session = getSession(sessionId);
-  if (!session?.writer?.updateWebSocket) return false;
-  session.writer.updateWebSocket(newRawWs);
-  console.log(`[RECONNECT] Writer swapped for session ${sessionId}`);
+  if (!session?.writer?.updateSocket) return false;
+  session.writer.updateSocket(newSocket);
+  console.log(`[RECONNECT] Writer swapped for session ${sessionId}, buffer flushed`);
   return true;
 }
 
