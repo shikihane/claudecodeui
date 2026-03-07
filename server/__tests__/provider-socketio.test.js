@@ -3,7 +3,7 @@ import { createSocketWriter } from '../socket-writer.js';
 
 describe('Provider Socket.IO Adaptation', () => {
   it('should create writer with correct interface', () => {
-    const mockSocket = { emit: () => {} };
+    const mockSocket = { emit: () => {}, connected: true };
     const writer = createSocketWriter(mockSocket);
 
     expect(writer).toHaveProperty('send');
@@ -12,7 +12,7 @@ describe('Provider Socket.IO Adaptation', () => {
 
   it('should emit cursor events via writer', () => {
     let emitted = null;
-    const mockSocket = { emit: (type, data) => { emitted = { type, data }; } };
+    const mockSocket = { emit: (type, data) => { emitted = { type, data }; }, connected: true };
     const writer = createSocketWriter(mockSocket);
 
     writer.send({ type: 'cursor-output', data: { text: 'cursor reply' } });
@@ -23,7 +23,7 @@ describe('Provider Socket.IO Adaptation', () => {
 
   it('should emit codex events via writer', () => {
     let emitted = null;
-    const mockSocket = { emit: (type, data) => { emitted = { type, data }; } };
+    const mockSocket = { emit: (type, data) => { emitted = { type, data }; }, connected: true };
     const writer = createSocketWriter(mockSocket);
 
     writer.send({ type: 'codex-response', data: { text: 'codex reply' } });
