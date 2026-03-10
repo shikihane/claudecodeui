@@ -49,14 +49,53 @@ export default function BackgroundTasksPopover({ currentSessionId }: { currentSe
   const [taskOutputs, setTaskOutputs] = useState<Map<string, TaskOutput>>(new Map());
   const { emit, socket, isConnected } = useSocketIO();
 
-  // On WebSocket (re)connect, request all un-ACK'd events for this session
+  // Restore task state from server on (re)connect and when session changes.
+  // Two triggers:
+  //   1. Socket connects → query ALL tasks (no sessionId filter) so badge count works
+  //   2. currentSessionId changes → re-query filtered + sync pending events
   const prevConnectedRef = useRef(false);
+  const prevSessionIdRef = useRef<string | null | undefined>(undefined);
+
+  const mergeTasksFromServer = (result: any) => {
+    if (result?.tasks?.length) {
+      setTasks(prev => {
+        const existingIds = new Set(prev.map(t => t.taskId));
+        const newTasks = result.tasks.filter((t: BackgroundTask) => !existingIds.has(t.taskId));
+        return newTasks.length ? [...prev, ...newTasks] : prev;
+      });
+    }
+    if (result?.bashTasks?.length) {
+      setBashTasks(prev => {
+        const existingIds = new Set(prev.map(b => b.id));
+        const newBash = result.bashTasks.filter((b: BashTask) => !existingIds.has(b.id));
+        return newBash.length ? [...prev, ...newBash] : prev;
+      });
+    }
+  };
+
   useEffect(() => {
-    if (isConnected && !prevConnectedRef.current && currentSessionId) {
+    if (!isConnected || !socket) {
+      prevConnectedRef.current = false;
+      return;
+    }
+
+    const justConnected = !prevConnectedRef.current;
+    const sessionChanged = currentSessionId !== prevSessionIdRef.current;
+
+    if (justConnected) {
+      // On connect: query ALL tasks (no session filter) to restore full list
+      socket.emit('query-active-tasks', {}, mergeTasksFromServer);
+    }
+
+    if (sessionChanged && currentSessionId) {
+      // On session change: query session-specific tasks + sync pending events
+      socket.emit('query-active-tasks', { sessionId: currentSessionId }, mergeTasksFromServer);
       emit('sync-background-events', { sessionId: currentSessionId });
     }
-    prevConnectedRef.current = isConnected;
-  }, [isConnected, currentSessionId, emit]);
+
+    prevConnectedRef.current = true;
+    prevSessionIdRef.current = currentSessionId;
+  }, [isConnected, currentSessionId, emit, socket]);
 
   const isMobile = useMemo(() => window.innerWidth < 768, []);
   const maxLines = useMemo(() => isMobile ? 50 : 200, [isMobile]);
@@ -93,6 +132,12 @@ export default function BackgroundTasksPopover({ currentSessionId }: { currentSe
     if (!socket) return;
 
     const handleTaskEvent = (msg: any) => {
+      // Filter by sessionId: with broadcast-to-all delivery, we receive events
+      // for ALL sessions. Only process events for our current session.
+      if (currentSessionId && msg.sessionId && msg.sessionId !== currentSessionId) {
+        return;
+      }
+
       // At-least-once: ACK receipt and deduplicate
       if (msg.eventId) {
         emit('ack-event', { eventId: msg.eventId, sessionId: msg.sessionId });
@@ -212,21 +257,28 @@ export default function BackgroundTasksPopover({ currentSessionId }: { currentSe
     const events = [
       'background-task-started',
       'background-task-completed',
-      'background-task-deleted',
+      'bash-started',
+      'bash-completed',
+      'subagent-progress',
+      'subagent-completed',
       'task-output',
       'task-killed'
     ];
 
-    events.forEach(event => {
-      socket.on(event, handleTaskEvent);
+    // Socket.IO events arrive without `type` in payload (it's the event name),
+    // but handleTaskEvent dispatches on msg.type — inject it back.
+    const wrappedHandlers = events.map(event => {
+      const handler = (data: any) => handleTaskEvent({ type: event, ...data });
+      socket.on(event, handler);
+      return { event, handler };
     });
 
     return () => {
-      events.forEach(event => {
-        socket.off(event, handleTaskEvent);
+      wrappedHandlers.forEach(({ event, handler }) => {
+        socket.off(event, handler);
       });
     };
-  }, [socket, emit]);
+  }, [socket, emit, currentSessionId]);
 
   const sessionTasks = currentSessionId
     ? tasks.filter(t => t.sessionId === currentSessionId)

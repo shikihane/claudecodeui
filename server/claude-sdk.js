@@ -20,7 +20,7 @@ import { execSync, spawn } from 'child_process';
 import path from 'path';
 import os from 'os';
 import { CLAUDE_MODELS } from '../shared/modelConstants.js';
-import { emitTaskEvent } from './ws-clients.js';
+import { emitTaskEvent } from './socket-rooms.js';
 import { addStreamingChunk, finalizeStreamingMessage, addPendingPermission, removePendingPermission } from './session-state.js';
 
 const activeSessions = new Map();
