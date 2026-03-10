@@ -215,7 +215,7 @@ export function useChatRealtimeHandlers({
         ? (latestMessage.data as Record<string, any>)
         : null;
 
-    const globalMessageTypes = ['projects_updated', 'taskmaster-project-updated', 'session-created'];
+    const globalMessageTypes = ['session-created'];
     const isGlobalMessage = globalMessageTypes.includes(String(latestMessage.type));
     const lifecycleMessageTypes = new Set([
       'claude-complete',
@@ -253,7 +253,13 @@ export function useChatRealtimeHandlers({
     const isBackgroundTaskEvent =
       (latestMessage.type === 'bash-completed' && latestMessage.background) ||
       latestMessage.type === 'subagent-completed';
-    const shouldBypassSessionFilter = isGlobalMessage || Boolean(isSystemInitForView) || isBackgroundTaskEvent;
+    // Background task events bypass the normal session filter but must still
+    // match the active session. With broadcast-to-all delivery, events include
+    // sessionId so we can validate ownership.
+    const isBackgroundTaskForThisSession =
+      isBackgroundTaskEvent &&
+      (!latestMessage.sessionId || !activeViewSessionId || latestMessage.sessionId === activeViewSessionId);
+    const shouldBypassSessionFilter = isGlobalMessage || Boolean(isSystemInitForView) || isBackgroundTaskForThisSession;
     const isUnscopedError =
       !latestMessage.sessionId &&
       pendingViewSessionRef.current &&
@@ -709,7 +715,11 @@ export function useChatRealtimeHandlers({
         );
         break;
 
-      case 'claude-error':
+      case 'claude-error': {
+        clearLoadingIndicators();
+        markSessionsAsCompleted(latestMessage.sessionId, currentSessionId, selectedSession?.id);
+        setPendingPermissionRequests([]);
+        setActiveSession(null);
         setChatMessages((previous) => [
           ...previous,
           {
@@ -719,6 +729,7 @@ export function useChatRealtimeHandlers({
           },
         ]);
         break;
+      }
 
       case 'cursor-system':
         try {
@@ -774,7 +785,11 @@ export function useChatRealtimeHandlers({
         ]);
         break;
 
-      case 'cursor-error':
+      case 'cursor-error': {
+        clearLoadingIndicators();
+        markSessionsAsCompleted(latestMessage.sessionId, currentSessionId, selectedSession?.id);
+        setPendingPermissionRequests([]);
+        setActiveSession(null);
         setChatMessages((previous) => [
           ...previous,
           {
@@ -784,6 +799,7 @@ export function useChatRealtimeHandlers({
           },
         ]);
         break;
+      }
 
       case 'cursor-result': {
         const cursorCompletedSessionId = latestMessage.sessionId || currentSessionId;
@@ -937,6 +953,7 @@ export function useChatRealtimeHandlers({
         }
 
         setPendingPermissionRequests([]);
+        setActiveSession(null);
 
         setChatMessages((previous) => [
           ...previous,
@@ -1141,9 +1158,11 @@ export function useChatRealtimeHandlers({
         break;
       }
 
-      case 'codex-error':
-        setIsLoading(false);
-        setCanAbortSession(false);
+      case 'codex-error': {
+        clearLoadingIndicators();
+        markSessionsAsCompleted(latestMessage.sessionId, currentSessionId, selectedSession?.id);
+        setPendingPermissionRequests([]);
+        setActiveSession(null);
         setChatMessages((previous) => [
           ...previous,
           {
@@ -1153,6 +1172,7 @@ export function useChatRealtimeHandlers({
           },
         ]);
         break;
+      }
 
       case 'session-aborted': {
         const pendingSessionId =
@@ -1168,6 +1188,7 @@ export function useChatRealtimeHandlers({
           }
 
           setPendingPermissionRequests([]);
+          setActiveSession(null);
           setChatMessages((previous) => [
             ...previous,
             {
@@ -1242,8 +1263,10 @@ export function useChatRealtimeHandlers({
         if (latestMessage.sessionId && currentSessionId && latestMessage.sessionId !== currentSessionId) {
           break;
         }
-        // Server is the source of truth - always use server data
-        const serverRequests = latestMessage.data || [];
+        // Server is the source of truth - always use server data.
+        // Server emits { sessionId, permissions: [...] } — after Socket.IO
+        // type injection, permissions are at latestMessage.permissions.
+        const serverRequests = latestMessage.permissions || latestMessage.data || [];
         setPendingPermissionRequests(serverRequests);
         break;
       }
@@ -1263,37 +1286,40 @@ export function useChatRealtimeHandlers({
       handleMessageRef.current?.(data);
     };
 
-    // Register all event listeners
+    // Register only events that the server actually emits.
+    // Omitted (never emitted): claude-output, claude-interactive-prompt,
+    // claude-status, cursor-tool-use, session-auto-aborted.
     const events = [
       // Claude events
-      'claude-response', 'claude-output', 'claude-complete', 'claude-error',
+      'claude-response', 'claude-complete', 'claude-error',
       'claude-permission-request', 'claude-permission-cancelled',
-      'claude-interactive-prompt', 'claude-status',
       // Cursor events
-      'cursor-system', 'cursor-user', 'cursor-output', 'cursor-tool-use',
+      'cursor-system', 'cursor-user', 'cursor-output',
       'cursor-result', 'cursor-error',
       // Codex events
       'codex-response', 'codex-complete', 'codex-error',
       // Session lifecycle
-      'session-created', 'session-aborted', 'session-auto-aborted', 'session-status',
-      // Background tasks
-      'bash-started', 'bash-completed', 'subagent-completed', 'subagent-progress',
-      'background-task-started', 'background-task-completed', 'background-task-deleted',
-      'task-output', 'task-killed',
+      'session-created', 'session-aborted', 'session-status',
+      // Background task completion notifications (insert chat cards)
+      'bash-completed', 'subagent-completed',
       // Other
-      'projects_updated', 'taskmaster-project-updated',
-      'token-budget', 'active-sessions', 'pending-permissions',
+      'token-budget', 'pending-permissions',
     ];
 
-    events.forEach(event => {
-      socket.on(event, (data) => {
+    // Store handler references so cleanup removes only OUR listeners,
+    // not all listeners for the event (socket.off(event) without a handler
+    // reference removes every listener).
+    const boundHandlers = events.map(event => {
+      const handler = (data: any) => {
         handleMessage({ type: event, ...data });
-      });
+      };
+      socket.on(event, handler);
+      return { event, handler };
     });
 
     return () => {
-      events.forEach(event => {
-        socket.off(event);
+      boundHandlers.forEach(({ event, handler }) => {
+        socket.off(event, handler);
       });
     };
   }, [socket]);

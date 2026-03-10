@@ -46,7 +46,7 @@ import pty from 'node-pty';
 import fetch from 'node-fetch';
 import mime from 'mime-types';
 
-import { ackEvent, syncPendingEvents } from './ws-clients.js';
+import { ackEvent, syncPendingEvents } from './socket-rooms.js';
 import { createSocketWriter } from './socket-writer.js';
 import { setupRoomManagement, broadcastToAll, broadcastToSession } from './socket-rooms.js';
 import { setupHeartbeat } from './socket-heartbeat.js';
@@ -507,6 +507,98 @@ io.on('connection', (socket) => {
     }
   });
 
+  // --- Background task handlers ---
+
+  socket.on('query-task-output', (data) => {
+    const { taskId, maxLines = 200 } = data || {};
+    if (!taskId) return;
+
+    const cached = backgroundTaskOutputs.get(taskId);
+    let raw = '';
+
+    if (cached?.content) {
+      // Inline content (completed tasks or CLI response)
+      raw = cached.content;
+    } else if (cached?.path) {
+      // File-based output (running tasks) — read live from disk
+      try {
+        raw = fs.readFileSync(cached.path, 'utf-8');
+      } catch (_) {
+        // File may not exist yet or be deleted
+      }
+    }
+
+    const output = truncateOutput(raw, maxLines);
+    socket.emit('task-output', { taskId, output });
+  });
+
+  socket.on('kill-task', async (data) => {
+    const { taskId } = data || {};
+    if (!taskId) return;
+
+    const task = backgroundTasks.get(taskId);
+    if (!task) {
+      socket.emit('task-killed', { taskId, success: false });
+      return;
+    }
+
+    const commandText = task.input?.command || '';
+    const result = await killBackgroundProcess(commandText);
+
+    if (result.success) {
+      task.status = 'completed';
+      task.endTime = Date.now();
+    }
+
+    socket.emit('task-killed', { taskId, success: result.success });
+  });
+
+  socket.on('ack-event', (data) => {
+    const { eventId, sessionId } = data || {};
+    if (eventId && sessionId) {
+      ackEvent(sessionId, eventId);
+    }
+  });
+
+  socket.on('sync-background-events', (data) => {
+    const { sessionId } = data || {};
+    if (sessionId) {
+      syncPendingEvents(sessionId, socket);
+    }
+  });
+
+  // Return current background task state (used on page refresh).
+  // If sessionId is provided, filters to that session; otherwise returns ALL tasks.
+  socket.on('query-active-tasks', (data, ack) => {
+    if (typeof ack !== 'function') return;
+    const { sessionId } = data || {};
+
+    const sessionTasks = [];
+    const sessionBashTasks = [];
+
+    for (const [taskId, task] of backgroundTasks) {
+      // When sessionId is provided, filter to that session only
+      if (sessionId && task.sessionId !== sessionId) continue;
+
+      if (task.toolName === 'Bash') {
+        sessionBashTasks.push({
+          id: taskId,
+          command: task.input?.command || '',
+          description: task.input?.description,
+          run_in_background: true,
+          startTime: task.startTime,
+          sessionId: task.sessionId,
+          status: task.status === 'completed' ? 'completed' : 'running',
+          endTime: task.endTime
+        });
+      } else {
+        sessionTasks.push(task);
+      }
+    }
+
+    ack({ tasks: sessionTasks, bashTasks: sessionBashTasks });
+  });
+
   socket.on('disconnect', (reason) => {
     console.log('[Socket.IO] Client disconnected:', socket.id, reason);
   });
@@ -578,9 +670,9 @@ function shouldAutoOpenUrlFromOutput(value = '') {
     );
 }
 
-// Single WebSocket server that handles both paths
+// Raw WebSocket server for /shell only (noServer — upgrades routed manually)
 const wss = new WebSocketServer({
-    server,
+    noServer: true,
     verifyClient: (info) => {
         console.log('WebSocket connection attempt to:', info.req.url);
 
@@ -614,6 +706,18 @@ const wss = new WebSocketServer({
         console.log('[OK] WebSocket authenticated for user:', user.username);
         return true;
     }
+});
+
+// Route HTTP upgrade requests: Socket.IO handles /socket.io, wss handles /shell
+server.on('upgrade', (request, socket, head) => {
+  if (request.url?.startsWith('/socket.io/')) {
+    // Let Socket.IO handle its own WebSocket upgrades (do nothing here)
+    return;
+  }
+  // All other upgrades (e.g. /shell) go to raw WebSocket server
+  wss.handleUpgrade(request, socket, head, (ws) => {
+    wss.emit('connection', ws, request);
+  });
 });
 
 // Make WebSocket server available to routes

@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { NavigateFunction } from 'react-router-dom';
 import { api } from '../utils/api';
+import { useSocketIO } from '../contexts/SocketIOContext';
 import type {
-  AppSocketMessage,
   AppTab,
   LoadingProgress,
   Project,
@@ -13,7 +13,6 @@ import type {
 type UseProjectsStateArgs = {
   sessionId?: string;
   navigate: NavigateFunction;
-  latestMessage?: AppSocketMessage | null;
   isMobile: boolean;
   activeSessions: Set<string>;
 };
@@ -104,10 +103,10 @@ const isUpdateAdditive = (
 export function useProjectsState({
   sessionId,
   navigate,
-  latestMessage,
   isMobile,
   activeSessions,
 }: UseProjectsStateArgs) {
+  const { socket, isConnected } = useSocketIO();
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
   const [selectedSession, setSelectedSession] = useState<ProjectSession | null>(null);
@@ -153,6 +152,20 @@ export function useProjectsState({
     void fetchProjects();
   }, [fetchProjects]);
 
+  // Re-fetch projects when Socket.IO reconnects (false → true transition).
+  // The socket object reference stays the same across reconnects, so we track
+  // isConnected transitions explicitly.
+  const prevConnectedRef = useRef(false);
+  useEffect(() => {
+    if (isConnected && !prevConnectedRef.current) {
+      // Skip the initial connect — fetchProjects() above handles that.
+      if (projects.length > 0) {
+        void fetchProjects();
+      }
+    }
+    prevConnectedRef.current = isConnected;
+  }, [isConnected, fetchProjects, projects.length]);
+
   // Auto-select the project when there is only one, so the user lands on the new session page
   useEffect(() => {
     if (!isLoadingProjects && projects.length === 1 && !selectedProject && !sessionId) {
@@ -160,96 +173,114 @@ export function useProjectsState({
     }
   }, [isLoadingProjects, projects, selectedProject, sessionId]);
 
-  useEffect(() => {
-    if (!latestMessage) {
-      return;
-    }
+  // Keep refs for values needed by Socket.IO handlers to avoid
+  // resubscribing on every state change.
+  const selectedProjectRef = useRef(selectedProject);
+  const selectedSessionRef = useRef(selectedSession);
+  const activeSessionsRef = useRef(activeSessions);
+  const projectsRef = useRef(projects);
+  useEffect(() => { selectedProjectRef.current = selectedProject; }, [selectedProject]);
+  useEffect(() => { selectedSessionRef.current = selectedSession; }, [selectedSession]);
+  useEffect(() => { activeSessionsRef.current = activeSessions; }, [activeSessions]);
+  useEffect(() => { projectsRef.current = projects; }, [projects]);
 
-    if (latestMessage.type === 'loading_progress') {
+  // Subscribe to Socket.IO events for real-time project/session updates
+  useEffect(() => {
+    if (!socket) return;
+
+    const handleLoadingProgress = (data: any) => {
       if (loadingProgressTimeoutRef.current) {
         clearTimeout(loadingProgressTimeoutRef.current);
         loadingProgressTimeoutRef.current = null;
       }
 
-      setLoadingProgress(latestMessage as LoadingProgress);
+      setLoadingProgress(data as LoadingProgress);
 
-      if (latestMessage.phase === 'complete') {
+      if (data.phase === 'complete') {
         loadingProgressTimeoutRef.current = setTimeout(() => {
           setLoadingProgress(null);
           loadingProgressTimeoutRef.current = null;
         }, 500);
       }
+    };
 
-      return;
-    }
+    const handleProjectsUpdated = (data: any) => {
+      const projectsMessage = data as ProjectsUpdatedMessage;
+      const curSelectedSession = selectedSessionRef.current;
+      const curSelectedProject = selectedProjectRef.current;
+      const curActiveSessions = activeSessionsRef.current;
+      const curProjects = projectsRef.current;
 
-    if (latestMessage.type !== 'projects_updated') {
-      return;
-    }
+      if (projectsMessage.changedFile && curSelectedSession && curSelectedProject) {
+        const normalized = projectsMessage.changedFile.replace(/\\/g, '/');
+        const changedFileParts = normalized.split('/');
 
-    const projectsMessage = latestMessage as ProjectsUpdatedMessage;
+        if (changedFileParts.length >= 2) {
+          const filename = changedFileParts[changedFileParts.length - 1];
+          const changedSessionId = filename.replace('.jsonl', '');
 
-    if (projectsMessage.changedFile && selectedSession && selectedProject) {
-      const normalized = projectsMessage.changedFile.replace(/\\/g, '/');
-      const changedFileParts = normalized.split('/');
+          if (changedSessionId === curSelectedSession.id) {
+            const isSessionActive = curActiveSessions.has(curSelectedSession.id);
 
-      if (changedFileParts.length >= 2) {
-        const filename = changedFileParts[changedFileParts.length - 1];
-        const changedSessionId = filename.replace('.jsonl', '');
-
-        if (changedSessionId === selectedSession.id) {
-          const isSessionActive = activeSessions.has(selectedSession.id);
-
-          if (!isSessionActive) {
-            setExternalMessageUpdate((prev) => prev + 1);
+            if (!isSessionActive) {
+              setExternalMessageUpdate((prev) => prev + 1);
+            }
           }
         }
       }
-    }
 
-    const hasActiveSession =
-      (selectedSession && activeSessions.has(selectedSession.id)) ||
-      (activeSessions.size > 0 && Array.from(activeSessions).some((id) => id.startsWith('new-session-')));
+      const hasActiveSession =
+        (curSelectedSession && curActiveSessions.has(curSelectedSession.id)) ||
+        (curActiveSessions.size > 0 && Array.from(curActiveSessions).some((id) => id.startsWith('new-session-')));
 
-    const updatedProjects = projectsMessage.projects;
+      const updatedProjects = projectsMessage.projects;
 
-    if (
-      hasActiveSession &&
-      !isUpdateAdditive(projects, updatedProjects, selectedProject, selectedSession)
-    ) {
-      return;
-    }
+      if (
+        hasActiveSession &&
+        !isUpdateAdditive(curProjects, updatedProjects, curSelectedProject, curSelectedSession)
+      ) {
+        return;
+      }
 
-    setProjects(updatedProjects);
+      setProjects(updatedProjects);
 
-    if (!selectedProject) {
-      return;
-    }
+      if (!curSelectedProject) {
+        return;
+      }
 
-    const updatedSelectedProject = updatedProjects.find(
-      (project) => project.name === selectedProject.name,
-    );
+      const updatedSelectedProject = updatedProjects.find(
+        (project) => project.name === curSelectedProject.name,
+      );
 
-    if (!updatedSelectedProject) {
-      return;
-    }
+      if (!updatedSelectedProject) {
+        return;
+      }
 
-    if (serialize(updatedSelectedProject) !== serialize(selectedProject)) {
-      setSelectedProject(updatedSelectedProject);
-    }
+      if (serialize(updatedSelectedProject) !== serialize(curSelectedProject)) {
+        setSelectedProject(updatedSelectedProject);
+      }
 
-    if (!selectedSession) {
-      return;
-    }
+      if (!curSelectedSession) {
+        return;
+      }
 
-    const updatedSelectedSession = getProjectSessions(updatedSelectedProject).find(
-      (session) => session.id === selectedSession.id,
-    );
+      const updatedSelectedSession = getProjectSessions(updatedSelectedProject).find(
+        (session) => session.id === curSelectedSession.id,
+      );
 
-    if (!updatedSelectedSession) {
-      setSelectedSession(null);
-    }
-  }, [latestMessage, selectedProject, selectedSession, activeSessions, projects]);
+      if (!updatedSelectedSession) {
+        setSelectedSession(null);
+      }
+    };
+
+    socket.on('loading_progress', handleLoadingProgress);
+    socket.on('projects_updated', handleProjectsUpdated);
+
+    return () => {
+      socket.off('loading_progress', handleLoadingProgress);
+      socket.off('projects_updated', handleProjectsUpdated);
+    };
+  }, [socket]);
 
   useEffect(() => {
     return () => {

@@ -41,11 +41,30 @@ export function SocketIOProvider({ children }: { children: React.ReactNode }) {
   const [recovered, setRecovered] = useState(false);
   const [lastReconnectResult, setLastReconnectResult] = useState<ReconnectResult | null>(null);
 
+  const prevSessionRef = useRef<string | null>(null);
+
   const setActiveSession = useCallback((sessionId: string | null, provider: string = 'claude') => {
+    const socket = socketRef.current;
+
+    // Only leave old room when switching to a DIFFERENT session.
+    // When sessionId is null (streaming ended), stay in the room
+    // so background task events (bash-completed, subagent-completed) still arrive.
+    if (socket && sessionId && prevSessionRef.current && prevSessionRef.current !== sessionId) {
+      socket.emit('leave-session', prevSessionRef.current);
+    }
+
     if (sessionId) {
       sessionStorage.setItem(ACTIVE_SESSION_KEY, JSON.stringify({ sessionId, provider }));
+      // Join the Socket.IO room for this session
+      if (socket) {
+        socket.emit('join-session', sessionId);
+      }
+      prevSessionRef.current = sessionId;
     } else {
-      sessionStorage.removeItem(ACTIVE_SESSION_KEY);
+      // Don't remove sessionStorage — keep it so page refresh can reconnect
+      // to restore pending permissions and background task state.
+      // Cleanup happens in the 'connect' handler when reconnect-session
+      // confirms the session is no longer active (isActive === false).
     }
   }, []);
 
@@ -61,7 +80,7 @@ export function SocketIOProvider({ children }: { children: React.ReactNode }) {
       reconnectionAttempts: Infinity
     });
 
-    socket.on('connect', () => {
+    const onConnect = () => {
       setIsConnected(true);
       setRecovered(socket.recovered);
 
@@ -71,6 +90,8 @@ export function SocketIOProvider({ children }: { children: React.ReactNode }) {
         try {
           const { sessionId, provider } = JSON.parse(stored) as ActiveSessionInfo;
           console.log('[SocketIO] Attempting session reconnect:', sessionId);
+          socket.emit('join-session', sessionId);
+          prevSessionRef.current = sessionId;
           socket.emit('reconnect-session', { sessionId, provider }, (result: ReconnectResult) => {
             console.log('[SocketIO] Reconnect result:', result);
             setLastReconnectResult(result);
@@ -83,16 +104,21 @@ export function SocketIOProvider({ children }: { children: React.ReactNode }) {
           sessionStorage.removeItem(ACTIVE_SESSION_KEY);
         }
       }
-    });
+    };
 
-    socket.on('disconnect', () => {
+    const onDisconnect = () => {
       setIsConnected(false);
       setRecovered(false);
-    });
+    };
+
+    socket.on('connect', onConnect);
+    socket.on('disconnect', onDisconnect);
 
     socketRef.current = socket;
 
     return () => {
+      socket.off('connect', onConnect);
+      socket.off('disconnect', onDisconnect);
       socket.disconnect();
       socketRef.current = null;
     };

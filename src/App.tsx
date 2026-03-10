@@ -18,7 +18,7 @@ export default function App() {
             <TasksSettingsProvider>
               <TaskMasterProvider>
                 <ProtectedRoute>
-                  <Router basename={window.__ROUTER_BASENAME__ || ''}>
+                  <Router basename={window.__ROUTER_BASENAME__ || ''} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
                     <Routes>
                       <Route path="/" element={<AppContent />} />
                       <Route path="/session/:sessionId" element={<AppContent />} />
