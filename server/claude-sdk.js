@@ -21,7 +21,7 @@ import path from 'path';
 import os from 'os';
 import { CLAUDE_MODELS } from '../shared/modelConstants.js';
 import { emitTaskEvent } from './socket-rooms.js';
-import { addStreamingChunk, finalizeStreamingMessage, addPendingPermission, removePendingPermission } from './session-state.js';
+import { addStreamingChunk, finalizeStreamingMessage, addPendingPermission, removePendingPermission, createSessionState, updateSessionState, deleteSessionState } from './session-state.js';
 
 const activeSessions = new Map();
 const pendingToolApprovals = new Map();
@@ -69,22 +69,61 @@ function getFallbackTasksDir() {
 }
 
 /**
- * Find the Claude Code tasks output directory.
- * Claude CLI writes output files to <tmpdir>/claude/tasks/<agentId>.output
- * The tmpdir varies by platform and environment.
+ * Encode a cwd path to the project directory name used by Claude CLI.
+ * The CLI replaces path separators and colons with dashes.
+ * e.g. "E:\Heyang5\claudecodeui" → "E--Heyang5-claudecodeui"
  */
-function findClaudeTasksDir() {
-  const candidates = [
-    // Windows: Claude CLI often uses /tmp which maps to <drive>:\tmp in Git Bash
-    ...(/^[A-Z]:/i.test(process.cwd()) ? [`${process.cwd().slice(0, 2)}/tmp/claude/tasks`] : []),
-    'E:/tmp/claude/tasks',
-    'C:/tmp/claude/tasks',
-    'D:/tmp/claude/tasks',
-    '/tmp/claude/tasks',
-    path.join(os.tmpdir(), 'claude', 'tasks'),
+function encodeProjectDir(cwd) {
+  return cwd.replace(/[\\/]/g, '-').replace(/:/g, '-');
+}
+
+/**
+ * Find the Claude Code tasks output directory.
+ * SDK 0.2.72+ uses project-specific subdirectories:
+ *   <tmpdir>/claude/<project-encoded>/tasks/
+ * Older versions used: <tmpdir>/claude/tasks/
+ *
+ * @param {string} [cwd] - Working directory to match the correct project subdir
+ */
+function findClaudeTasksDir(cwd) {
+  const baseDirs = [
+    path.join(os.tmpdir(), 'claude'),
   ];
-  for (const dir of candidates) {
-    if (fs.existsSync(dir)) return dir;
+  if (process.platform === 'win32' && /^[A-Z]:/i.test(process.cwd())) {
+    const drive = process.cwd().slice(0, 2);
+    baseDirs.push(path.join(drive, '/tmp/claude'));
+  }
+  baseDirs.push(
+    'E:/tmp/claude', 'C:/tmp/claude', 'D:/tmp/claude',
+    '/tmp/claude'
+  );
+
+  // Build the encoded project name for matching
+  const projectEncoded = encodeProjectDir(cwd || process.cwd());
+
+  for (const baseDir of baseDirs) {
+    if (!fs.existsSync(baseDir)) continue;
+
+    // 1. Try exact project match first
+    if (projectEncoded) {
+      const exactDir = path.join(baseDir, projectEncoded, 'tasks');
+      if (fs.existsSync(exactDir)) return exactDir;
+    }
+
+    // 2. Fall back: scan for any project subdir with tasks/
+    try {
+      const entries = fs.readdirSync(baseDir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isDirectory() && entry.name !== 'tasks') {
+          const projectTasksDir = path.join(baseDir, entry.name, 'tasks');
+          if (fs.existsSync(projectTasksDir)) return projectTasksDir;
+        }
+      }
+    } catch (_) { /* permission denied etc. */ }
+
+    // 3. Legacy flat structure: <baseDir>/tasks/
+    const legacyDir = path.join(baseDir, 'tasks');
+    if (fs.existsSync(legacyDir)) return legacyDir;
   }
   return null;
 }
@@ -155,10 +194,53 @@ function monitorSubagentCompletion(agentId, toolUseId, ws) {
           fs.readSync(fd, buffer, 0, stat.size, 0);
           const content = buffer.toString('utf-8');
 
+          // SDK 0.2.72+ writes JSONL transcript (one JSON per line).
+          // Completion = last assistant message has stop_reason "end_turn".
+          // Legacy format used "--- RESULT ---" separator.
+          let resultText = '';
+          let toolLog = '';
+          let isComplete = false;
+
           if (content.includes('--- RESULT ---')) {
-            // Extract result after the separator
-            const resultText = content.split('--- RESULT ---')[1]?.trim() || '';
-            const toolLog = content.split('--- RESULT ---')[0]?.trim() || '';
+            // Legacy format
+            resultText = content.split('--- RESULT ---')[1]?.trim() || '';
+            toolLog = content.split('--- RESULT ---')[0]?.trim() || '';
+            isComplete = true;
+          } else {
+            // JSONL transcript format
+            const lines = content.trim().split('\n');
+            for (let i = lines.length - 1; i >= 0; i--) {
+              try {
+                const entry = JSON.parse(lines[i]);
+                if (entry.type === 'assistant' && entry.message?.stop_reason === 'end_turn') {
+                  // Extract text from assistant's content blocks
+                  const textParts = (entry.message.content || [])
+                    .filter(c => c.type === 'text')
+                    .map(c => c.text);
+                  resultText = textParts.join('\n') || '';
+                  isComplete = true;
+                  break;
+                }
+              } catch (_) { /* skip unparseable lines */ }
+            }
+            // Also extract tool results for the log
+            if (isComplete) {
+              for (const line of lines) {
+                try {
+                  const entry = JSON.parse(line);
+                  if (entry.type === 'user' && entry.message?.content) {
+                    for (const part of entry.message.content) {
+                      if (part.type === 'tool_result' && part.content) {
+                        toolLog += (typeof part.content === 'string' ? part.content : '') + '\n';
+                      }
+                    }
+                  }
+                } catch (_) {}
+              }
+            }
+          }
+
+          if (isComplete) {
 
             console.log(`[SUBAGENT] ${agentId} completed, result length: ${resultText.length}`);
 
@@ -206,8 +288,27 @@ function monitorSubagentCompletion(agentId, toolUseId, ws) {
                 taskId: toolUseId
               });
             }
-            // Output is cached in backgroundTaskOutputs for retrieval via query-task-output.
-            // Do NOT inject as user prompt -- that would create a spurious chat message.
+            // Auto-trigger a follow-up query so the agent processes the result immediately
+            if (task?.queryOptions && task?.writer) {
+              // Notify frontend that auto-follow-up is starting so it shows processing indicator
+              task.writer.send({
+                type: 'session-status',
+                sessionId: task.sessionId,
+                isProcessing: true
+              });
+
+              const MAX_INJECT = 8000;
+              let injectContent = resultText;
+              if (injectContent.length > MAX_INJECT) {
+                injectContent = `... (${injectContent.length - MAX_INJECT} characters truncated) ...\n` + injectContent.slice(-MAX_INJECT);
+              }
+              const followupPrompt = `<background-task-completed task-id="${toolUseId}" type="subagent" agent-id="${agentId}">\n${injectContent}\n</background-task-completed>`;
+              console.log(`[SUBAGENT] Auto-triggering follow-up query for completed subagent ${agentId}`);
+              const followupOptions = { ...task.queryOptions, sessionId: task.sessionId, _isFollowup: true };
+              queryClaudeSDK(followupPrompt, followupOptions, task.writer).catch(e => {
+                console.error(`[SUBAGENT] Follow-up query failed:`, e.message);
+              });
+            }
             return;
           }
         }
@@ -403,6 +504,28 @@ function monitorBackgroundBash(taskId, outputPath, ws) {
               background: true,
               outputSnippet
             });
+
+            // Auto-trigger a follow-up query so the agent processes the result immediately
+            if (task.queryOptions && task.writer) {
+              // Notify frontend that auto-follow-up is starting so it shows processing indicator
+              task.writer.send({
+                type: 'session-status',
+                sessionId: task.sessionId,
+                isProcessing: true
+              });
+
+              const MAX_INJECT = 8000;
+              let injectContent = outputContent;
+              if (injectContent.length > MAX_INJECT) {
+                injectContent = `... (${injectContent.length - MAX_INJECT} characters truncated) ...\n` + injectContent.slice(-MAX_INJECT);
+              }
+              const followupPrompt = `<background-task-completed task-id="${taskId}" command="${command.slice(0, 200)}">\n${injectContent}\n</background-task-completed>`;
+              console.log(`[BASH-MONITOR] Auto-triggering follow-up query for completed task ${taskId}`);
+              const followupOptions = { ...task.queryOptions, sessionId: task.sessionId, _isFollowup: true };
+              queryClaudeSDK(followupPrompt, followupOptions, task.writer).catch(e => {
+                console.error(`[BASH-MONITOR] Follow-up query failed:`, e.message);
+              });
+            }
           }
         }
       }
@@ -576,11 +699,6 @@ function mapCliOptionsToSDK(options = {}) {
     sdkOptions.cwd = cwd;
   }
 
-  // Map permission mode
-  if (permissionMode && permissionMode !== 'default') {
-    sdkOptions.permissionMode = permissionMode;
-  }
-
   // Map tool settings
   const settings = toolsSettings || {
     allowedTools: [],
@@ -588,9 +706,16 @@ function mapCliOptionsToSDK(options = {}) {
     skipPermissions: false
   };
 
-  // Handle tool permissions
-  if (settings.skipPermissions && permissionMode !== 'plan') {
-    // When skipping permissions, use bypassPermissions mode
+  // Always set bypassPermissions: subagents run as separate processes without
+  // access to our canUseTool callback or any interactive TTY. Without this,
+  // the subagent's internal permission system defaults to "deny" for tools
+  // like Bash — a false rejection since no permission prompt was ever shown.
+  //
+  // For the parent agent, our canUseTool callback overrides this and still
+  // handles permissions interactively (unless skipPermissions is enabled).
+  if (permissionMode === 'plan') {
+    sdkOptions.permissionMode = 'plan';
+  } else {
     sdkOptions.permissionMode = 'bypassPermissions';
   }
 
@@ -692,6 +817,8 @@ function addSession(sessionId, queryInstance, tempImagePaths = [], tempDir = nul
     tempDir,
     writer
   });
+  // Create session state for reconnect state tracking
+  createSessionState(sessionId, 'claude');
 }
 
 /**
@@ -700,6 +827,7 @@ function addSession(sessionId, queryInstance, tempImagePaths = [], tempDir = nul
  */
 function removeSession(sessionId) {
   activeSessions.delete(sessionId);
+  deleteSessionState(sessionId);
 }
 
 /**
@@ -1004,15 +1132,46 @@ async function queryClaudeSDK(command, options = {}, ws) {
 
     // Handle images - save to temp files and modify prompt
     const imageResult = await handleImages(command, options.images, options.cwd);
-    const finalCommand = imageResult.modifiedCommand;
+    let finalCommand = imageResult.modifiedCommand;
     tempImagePaths = imageResult.tempImagePaths;
     tempDir = imageResult.tempDir;
 
+    // Inject undelivered background task outputs into the prompt so the agent
+    // can see results without needing to `cat` output files (which CLI deletes).
+    // Skip for follow-up queries — their prompt already contains the output.
+    const MAX_OUTPUT_CHARS = 8000;
+    const pendingOutputs = [];
+    if (!options._isFollowup) for (const [taskId, output] of backgroundTaskOutputs) {
+      if (output.deliveredToAgent || !output.content) continue;
+      const task = backgroundTasks.get(taskId);
+      if (task && task.sessionId === sessionId) {
+        const label = task.toolName === 'Bash'
+          ? `Background command${task.input?.command ? ` "${task.input.command.slice(0, 100)}"` : ''}`
+          : `Background task (${task.toolName || 'Task'})`;
+        let content = output.content;
+        if (content.length > MAX_OUTPUT_CHARS) {
+          content = `... (${content.length - MAX_OUTPUT_CHARS} characters truncated) ...\n` + content.slice(-MAX_OUTPUT_CHARS);
+        }
+        pendingOutputs.push(`[${label} completed]\n${content}`);
+        output.deliveredToAgent = true;
+      }
+    }
+    if (pendingOutputs.length > 0 && finalCommand) {
+      const outputBlock = pendingOutputs.join('\n\n');
+      finalCommand = `${finalCommand}\n\n<background-task-results>\n${outputBlock}\n</background-task-results>`;
+      console.log(`[SDK] Injected ${pendingOutputs.length} background task output(s) into prompt`);
+    }
+
+    // canUseTool is called for the PARENT agent's tool use. Subagent tool use
+    // is handled by the SDK's internal permission system (bypassPermissions).
+    // This callback provides interactive permission UI for the parent agent.
+    const userSkipPermissions = options.toolsSettings?.skipPermissions && sdkOptions.permissionMode !== 'plan';
     sdkOptions.canUseTool = async (toolName, input, context) => {
       const requiresInteraction = TOOLS_REQUIRING_INTERACTION.has(toolName);
 
       if (!requiresInteraction) {
-        if (sdkOptions.permissionMode === 'bypassPermissions') {
+        // User explicitly opted in to skip all permissions
+        if (userSkipPermissions) {
           return { behavior: 'allow', updatedInput: input };
         }
 
@@ -1032,17 +1191,20 @@ async function queryClaudeSDK(command, options = {}, ws) {
       }
 
       const requestId = createRequestId();
-      console.log(`[PERMISSION] Sending permission request for ${toolName}, requestId: ${requestId}, sessionId: ${capturedSessionId || sessionId || null}`);
+      const agentId = context?.agentID;
+      const effectiveSessionId = capturedSessionId || sessionId || null;
+      console.log(`[PERMISSION] Sending permission request for ${toolName}, requestId: ${requestId}, sessionId: ${effectiveSessionId}, agentId: ${agentId || 'parent'}, wsConnected: ${!!(ws._socket || ws).connected ?? 'unknown'}, bufferSize: ${ws.getBufferSize?.() ?? 'N/A'}`);
 
       // Add pending permission to session state
-      addPendingPermission(capturedSessionId || sessionId, { requestId, toolName, input });
+      addPendingPermission(effectiveSessionId, { requestId, toolName, input });
 
       ws.send({
         type: 'claude-permission-request',
         requestId,
         toolName,
         input,
-        sessionId: capturedSessionId || sessionId || null
+        sessionId: effectiveSessionId,
+        agentId: agentId || null
       });
 
       console.log(`[PERMISSION] Waiting for approval decision for ${toolName}, requestId: ${requestId}`);
@@ -1114,16 +1276,28 @@ async function queryClaudeSDK(command, options = {}, ws) {
       addSession(capturedSessionId, queryInstance, tempImagePaths, tempDir, ws);
     }
 
+    // Types of SDK messages that should be forwarded to the frontend.
+    // SDK 0.2.72+ emits many internal system subtypes (task_started, task_progress,
+    // status, tool_progress, etc.) that the frontend doesn't handle.
+    const forwardableTypes = new Set(['assistant', 'user', 'result', 'stream_event']);
+
     // Process streaming messages
     console.log('Starting async generator loop for session:', capturedSessionId || 'NEW');
     let messageCount = 0;
+    let completeSentEarly = false;
     for await (const message of queryInstance) {
       messageCount++;
+
+      // Set session status to streaming on first message
+      if (messageCount === 1) {
+        updateSessionState(capturedSessionId || sessionId, { status: 'streaming' });
+      }
       // Capture session ID from first message
       if (message.session_id && !capturedSessionId) {
 
         capturedSessionId = message.session_id;
         addSession(capturedSessionId, queryInstance, tempImagePaths, tempDir, ws);
+        updateSessionState(capturedSessionId, { status: 'streaming' });
 
         // Set session ID on writer
         if (ws.setSessionId && typeof ws.setSessionId === 'function') {
@@ -1147,7 +1321,114 @@ async function queryClaudeSDK(command, options = {}, ws) {
       // Transform and send message to WebSocket
       const transformedMessage = transformMessage(message);
 
-      // Accumulate streaming text chunks for session state
+      // Filter which SDK messages should be forwarded to the frontend.
+      const isSystemInit = message.type === 'system' && message.subtype === 'init';
+      // Synthetic user messages (skill content, task notifications) should not appear as chat bubbles.
+      // But tool_result synthetic messages are needed for the tool call flow.
+      const isSyntheticTextOnly = message.type === 'user' && message.isSynthetic
+        && !message.message?.content?.some?.(p => p.type === 'tool_result');
+
+      // Intercept <task-notification> messages: these are synthetic user messages injected
+      // by the SDK when a background subagent completes. We handle them server-side
+      // (trigger auto-follow-up) and do NOT forward them to the frontend as user bubbles.
+      let isTaskNotification = false;
+      if (message.type === 'user') {
+        const parts = message.message?.content || [];
+        for (const part of parts) {
+          const text = part.type === 'tool_result'
+            ? (typeof part.content === 'string' ? part.content : Array.isArray(part.content) ? part.content.map(c => c.text || '').join('') : '')
+            : (part.text || '');
+          if (text.includes('<task-notification>') && text.includes('<status>completed</status>')) {
+            isTaskNotification = true;
+            // Extract output-file path and handle subagent completion from the stream
+            const outputMatch = text.match(/<output-file>(.+?)<\/output-file>/);
+            const agentIdMatch = text.match(/<task-id>(.+?)<\/task-id>/);
+            const toolUseIdMatch = text.match(/<tool-use-id>(.+?)<\/tool-use-id>/);
+            const resultMatch = text.match(/<result>([\s\S]*?)<\/result>/);
+            if (agentIdMatch && toolUseIdMatch) {
+              const notifAgentId = agentIdMatch[1];
+              const notifToolUseId = toolUseIdMatch[1];
+              const notifResult = resultMatch ? resultMatch[1].trim() : '';
+              const notifOutputFile = outputMatch ? outputMatch[1].trim() : null;
+              console.log(`[SDK] Intercepted <task-notification> for agent ${notifAgentId}, output: ${notifOutputFile}`);
+
+              // Stop the subagent monitor (it may be watching the wrong path)
+              if (subagentMonitors.has(notifAgentId)) {
+                clearInterval(subagentMonitors.get(notifAgentId));
+                subagentMonitors.delete(notifAgentId);
+                transcriptPathCache.delete(notifAgentId);
+                console.log(`[SDK] Stopped subagent monitor for ${notifAgentId} (handled via stream notification)`);
+              }
+
+              // Read full output from the file if available
+              let fullResult = notifResult;
+              if (notifOutputFile) {
+                try {
+                  const fileContent = fs.readFileSync(notifOutputFile, 'utf-8');
+                  if (fileContent.includes('--- RESULT ---')) {
+                    fullResult = fileContent.split('--- RESULT ---')[1]?.trim() || notifResult;
+                  }
+                } catch (_) { /* file may already be deleted */ }
+              }
+
+              // Store output
+              backgroundTaskOutputs.set(notifToolUseId, {
+                type: 'inline',
+                content: fullResult,
+                agentId: notifAgentId
+              });
+
+              // Update task status
+              const task = backgroundTasks.get(notifToolUseId);
+              if (task) {
+                task.status = 'completed';
+                task.endTime = Date.now();
+                evictOldestCompletedTasks();
+              }
+
+              // Notify frontend
+              const taskSessionId = task?.sessionId || capturedSessionId || sessionId || null;
+              if (taskSessionId) {
+                emitTaskEvent(taskSessionId, {
+                  type: 'subagent-completed',
+                  agentId: notifAgentId,
+                  taskId: notifToolUseId,
+                  output: fullResult
+                });
+                emitTaskEvent(taskSessionId, {
+                  type: 'background-task-completed',
+                  taskId: notifToolUseId
+                });
+              }
+
+              // Auto-trigger follow-up query
+              if (task?.queryOptions && task?.writer) {
+                task.writer.send({
+                  type: 'session-status',
+                  sessionId: task.sessionId,
+                  isProcessing: true
+                });
+                const MAX_INJECT = 8000;
+                let injectContent = fullResult;
+                if (injectContent.length > MAX_INJECT) {
+                  injectContent = `... (${injectContent.length - MAX_INJECT} characters truncated) ...\n` + injectContent.slice(-MAX_INJECT);
+                }
+                const followupPrompt = `<background-task-completed task-id="${notifToolUseId}" type="subagent" agent-id="${notifAgentId}">\n${injectContent}\n</background-task-completed>`;
+                console.log(`[SDK] Auto-triggering follow-up query for subagent ${notifAgentId} (via stream notification)`);
+                const followupOptions = { ...task.queryOptions, sessionId: task.sessionId, _isFollowup: true };
+                queryClaudeSDK(followupPrompt, followupOptions, task.writer).catch(e => {
+                  console.error(`[SDK] Follow-up query from stream notification failed:`, e.message);
+                });
+              }
+            }
+            break;
+          }
+        }
+      }
+
+      const shouldForward = (forwardableTypes.has(message.type) || isSystemInit) && !isSyntheticTextOnly && !isTaskNotification;
+
+      // Accumulate streaming text chunks for session state (even for filtered messages)
       if (transformedMessage && transformedMessage.content) {
         for (const contentBlock of transformedMessage.content || []) {
           if (contentBlock.type === 'text' && contentBlock.text) {
@@ -1156,11 +1437,13 @@ async function queryClaudeSDK(command, options = {}, ws) {
         }
       }
 
-      ws.send({
-        type: 'claude-response',
-        data: transformedMessage,
-        sessionId: capturedSessionId || sessionId || null
-      });
+      if (shouldForward) {
+        ws.send({
+          type: 'claude-response',
+          data: transformedMessage,
+          sessionId: capturedSessionId || sessionId || null
+        });
+      }
 
       // Detect background tasks (Task/Bash with run_in_background=true)
       const messageData = message.message || message;
@@ -1179,14 +1462,18 @@ async function queryClaudeSDK(command, options = {}, ws) {
               if (toolInput.run_in_background) {
                 backgroundBashToolIds.add(toolId);
 
-                // Also add to backgroundTasks for kill-task functionality
+                // Also add to backgroundTasks for kill-task functionality.
+                // Only store queryOptions/writer for auto-followup on user-initiated queries,
+                // NOT on follow-up queries themselves (prevents infinite chain).
                 const taskInfo = {
                   taskId: toolId,
                   toolName: 'Bash',
                   input: toolInput,
                   sessionId: capturedSessionId || sessionId || null,
                   startTime: Date.now(),
-                  status: 'running'
+                  status: 'running',
+                  queryOptions: options._isFollowup ? null : options,
+                  writer: options._isFollowup ? null : ws
                 };
                 backgroundTasks.set(toolId, taskInfo);
                 evictOldestCompletedTasks();
@@ -1215,7 +1502,9 @@ async function queryClaudeSDK(command, options = {}, ws) {
                 input: toolInput,
                 sessionId: capturedSessionId || sessionId || null,
                 startTime: Date.now(),
-                status: 'running'
+                status: 'running',
+                queryOptions: options._isFollowup ? null : options,
+                writer: options._isFollowup ? null : ws
               };
 
               backgroundTasks.set(toolId, taskInfo);
@@ -1342,9 +1631,27 @@ async function queryClaudeSDK(command, options = {}, ws) {
             sessionId: capturedSessionId || sessionId || null
           });
         }
-        // SDK bug workaround: generator may hang after result message.
-        // Break out of the loop to prevent infinite blocking.
-        break;
+
+        // If there are active background subagents, keep consuming the generator
+        // so that their permission requests (canUseTool) and completion messages
+        // can still be processed. Breaking prematurely calls generator.return()
+        // which signals the SDK to tear down everything, killing subagents.
+        const hasActiveSubagents = subagentMonitors.size > 0;
+        if (hasActiveSubagents) {
+          console.log(`[SDK] Result received but ${subagentMonitors.size} subagent(s) still active, continuing generator. Will log all subsequent messages.`);
+          // Send claude-complete to frontend but keep consuming
+          completeSentEarly = true;
+          ws.send({
+            type: 'claude-complete',
+            sessionId: capturedSessionId,
+            exitCode: 0,
+            isNewSession: !sessionId && !!command
+          });
+          // Don't break — let the generator keep running for subagent events
+        } else {
+          // No active subagents, safe to break
+          break;
+        }
       }
     }
 
@@ -1359,15 +1666,19 @@ async function queryClaudeSDK(command, options = {}, ws) {
     // Restore any task output files the CLI deleted on exit
     await restoreTaskOutputFiles();
 
-    // Send completion event
-    console.log('Streaming complete, sending claude-complete event');
-    ws.send({
-      type: 'claude-complete',
-      sessionId: capturedSessionId,
-      exitCode: 0,
-      isNewSession: !sessionId && !!command
-    });
-    console.log('claude-complete event sent');
+    // Send completion event (only if not already sent for subagent continuation)
+    if (!completeSentEarly) {
+      console.log('Streaming complete, sending claude-complete event');
+      ws.send({
+        type: 'claude-complete',
+        sessionId: capturedSessionId,
+        exitCode: 0,
+        isNewSession: !sessionId && !!command
+      });
+      console.log('claude-complete event sent');
+    } else {
+      console.log('Streaming complete (claude-complete already sent earlier for subagent continuation)');
+    }
 
   } catch (error) {
     console.error('SDK query error:', error);

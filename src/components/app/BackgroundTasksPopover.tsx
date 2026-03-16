@@ -56,6 +56,17 @@ export default function BackgroundTasksPopover({ currentSessionId }: { currentSe
   const prevConnectedRef = useRef(false);
   const prevSessionIdRef = useRef<string | null | undefined>(undefined);
 
+  // Full replacement: used on reconnect to get authoritative state from server
+  const replaceTasksFromServer = (result: any) => {
+    if (Array.isArray(result?.tasks)) {
+      setTasks(result.tasks);
+    }
+    if (Array.isArray(result?.bashTasks)) {
+      setBashTasks(result.bashTasks);
+    }
+  };
+
+  // Merge: used on session change to add session-specific tasks without losing others
   const mergeTasksFromServer = (result: any) => {
     if (result?.tasks?.length) {
       setTasks(prev => {
@@ -83,12 +94,14 @@ export default function BackgroundTasksPopover({ currentSessionId }: { currentSe
     const sessionChanged = currentSessionId !== prevSessionIdRef.current;
 
     if (justConnected) {
-      // On connect: query ALL tasks (no session filter) to restore full list
-      socket.emit('query-active-tasks', {}, mergeTasksFromServer);
-    }
-
-    if (sessionChanged && currentSessionId) {
-      // On session change: query session-specific tasks + sync pending events
+      // On connect: full snapshot replacement to get authoritative state
+      socket.emit('query-active-tasks', {}, replaceTasksFromServer);
+      // Sync any pending at-least-once events
+      if (currentSessionId) {
+        emit('sync-background-events', { sessionId: currentSessionId });
+      }
+    } else if (sessionChanged && currentSessionId) {
+      // On session change: merge session-specific tasks + sync pending events
       socket.emit('query-active-tasks', { sessionId: currentSessionId }, mergeTasksFromServer);
       emit('sync-background-events', { sessionId: currentSessionId });
     }

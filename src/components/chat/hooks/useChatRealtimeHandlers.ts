@@ -259,7 +259,12 @@ export function useChatRealtimeHandlers({
     const isBackgroundTaskForThisSession =
       isBackgroundTaskEvent &&
       (!latestMessage.sessionId || !activeViewSessionId || latestMessage.sessionId === activeViewSessionId);
-    const shouldBypassSessionFilter = isGlobalMessage || Boolean(isSystemInitForView) || isBackgroundTaskForThisSession;
+    // Permission events must bypass the session filter because during new session
+    // creation, activeViewSessionId is null but the permission request has already arrived.
+    const isPermissionEvent =
+      latestMessage.type === 'claude-permission-request' ||
+      latestMessage.type === 'claude-permission-cancelled';
+    const shouldBypassSessionFilter = isGlobalMessage || Boolean(isSystemInitForView) || isBackgroundTaskForThisSession || isPermissionEvent;
     const isUnscopedError =
       !latestMessage.sessionId &&
       pendingViewSessionRef.current &&
@@ -672,7 +677,16 @@ export function useChatRealtimeHandlers({
         break;
 
       case 'claude-permission-request':
+        console.log('[Permission] Received permission request:', {
+          requestId: latestMessage.requestId,
+          toolName: latestMessage.toolName,
+          agentId: latestMessage.agentId,
+          sessionId: latestMessage.sessionId,
+          provider,
+          activeViewSessionId,
+        });
         if (provider !== 'claude' || !latestMessage.requestId) {
+          console.log('[Permission] IGNORED: provider mismatch or missing requestId');
           break;
         }
         {

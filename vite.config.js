@@ -1,5 +1,6 @@
 import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
+import Terminal from 'vite-plugin-terminal'
 
 export default defineConfig(({ command, mode }) => {
   // Load env file based on `mode` in the current working directory.
@@ -11,8 +12,15 @@ export default defineConfig(({ command, mode }) => {
   const proxyHost = host === '0.0.0.0' ? 'localhost' : host
   const port = env.PORT || 3001
 
+  const plugins = [react()]
+
+  // In dev mode, forward browser console.log/warn/error to Vite terminal
+  if (command === 'serve') {
+    plugins.push(Terminal({ console: 'terminal' }))
+  }
+
   return {
-    plugins: [react()],
+    plugins,
     server: {
       host,
       port: parseInt(env.VITE_PORT) || 5173,

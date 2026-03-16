@@ -474,7 +474,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('claude-permission-response', (data) => {
-    console.log('[Socket.IO] permission response received, requestId:', data.requestId);
+    console.log('[Socket.IO] permission response received, requestId:', data.requestId, 'allow:', data.allow, 'from socket:', socket.id);
     resolveToolApproval(data.requestId, data);
   });
 
