@@ -305,6 +305,9 @@ export function useChatSessionState({
     pendingScrollRestoreRef.current = null;
     setVisibleMessageCount(INITIAL_VISIBLE_MESSAGES);
     setIsUserScrolledUp(false);
+    // Reset message sync state so a fresh load always syncs regardless of previous count
+    prevSessionMessagesLengthRef.current = 0;
+    isInitialLoadRef.current = true;
   }, [selectedProject?.name, selectedSession?.id]);
 
   useEffect(() => {
@@ -504,14 +507,17 @@ export function useChatSessionState({
   const isInitialLoadRef = useRef(true);
 
   useEffect(() => {
-    // Only sync sessionMessages to chatMessages when:
-    // 1. Not currently loading (to avoid overwriting user's just-sent message)
-    // 2. SessionMessages actually changed
-    // 3. Either it's initial load OR sessionMessages increased (new messages from server)
+    // Sync sessionMessages to chatMessages when:
+    // 1. SessionMessages actually changed (length differs from last known)
+    // 2. Either:
+    //    a. Not loading (safe to overwrite – avoids clobbering a user's in-flight streaming message)
+    //    b. OR this is an initial session load (isInitialLoadRef) – allow even when isLoading=true
+    //       because check-session-status can set isLoading before the API fetch completes,
+    //       and we must still show the historical messages.
     if (
       sessionMessages.length > 0 &&
       sessionMessages.length !== prevSessionMessagesLengthRef.current &&
-      !isLoading
+      (!isLoading || isInitialLoadRef.current)
     ) {
       // Only update if this is initial load or if sessionMessages grew (server added messages)
       // Don't update if sessionMessages shrunk (user might have just sent a message)
@@ -613,7 +619,10 @@ export function useChatSessionState({
   }, [handleScroll]);
 
   useEffect(() => {
-    const activeViewSessionId = selectedSession?.id || currentSessionId;
+    // Use only selectedSession?.id here (not `|| currentSessionId`) because currentSessionId
+    // is cleared asynchronously. If we fall back to currentSessionId when selectedSession is null
+    // (e.g. after "New session" click), we'd spuriously re-set isLoading=true for the old session.
+    const activeViewSessionId = selectedSession?.id;
     if (!activeViewSessionId || !processingSessions) {
       return;
     }
@@ -623,7 +632,7 @@ export function useChatSessionState({
       setIsLoading(true);
       setCanAbortSession(true);
     }
-  }, [currentSessionId, isLoading, processingSessions, selectedSession?.id]);
+  }, [isLoading, processingSessions, selectedSession?.id]);
 
   // Show "Load all" overlay after a batch finishes loading, persist for 2s then hide
   const prevLoadingRef = useRef(false);

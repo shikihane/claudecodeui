@@ -357,14 +357,15 @@ interface ClassifiedMessage {
 }
 
 const classifyUserMessage = (content: string): ClassifiedMessage | null => {
-  // 1. <task-notification> — parse status/summary
-  const taskNotifRegex = /<task-notification>\s*<task-id>[^<]*<\/task-id>\s*(?:<tool-use-id>[^<]*<\/tool-use-id>\s*)?<output-file>[^<]*<\/output-file>\s*<status>([^<]*)<\/status>\s*<summary>([^<]*)<\/summary>\s*<\/task-notification>/;
-  const taskMatch = taskNotifRegex.exec(content);
-  if (taskMatch) {
+  // 1. <task-notification> — detect by tag presence; extract fields individually so we're
+  //    resilient to SDK format variations (optional <summary>, extra <result> element, etc.)
+  if (content.includes('<task-notification>')) {
+    const statusMatch = content.match(/<status>([^<]*)<\/status>/);
+    const summaryMatch = content.match(/<summary>([^<]*)<\/summary>/);
     return {
       injectedType: 'task-notification',
-      injectedSummary: taskMatch[2]?.trim() || 'Background task finished',
-      taskStatus: taskMatch[1]?.trim() || 'completed',
+      injectedSummary: summaryMatch?.[1]?.trim() || 'Background task finished',
+      taskStatus: statusMatch?.[1]?.trim() || 'completed',
     };
   }
 
@@ -495,6 +496,24 @@ export const convertSessionMessages = (rawMessages: any[]): ChatMessage[] => {
           }
         });
         content = textParts.join('\n');
+
+        // If no text parts were found, also scan tool_result content for <task-notification>.
+        // The SDK stores task-notifications inside tool_result.content in some versions.
+        if (!content) {
+          for (const part of message.message.content) {
+            if (part.type === 'tool_result') {
+              const trText = typeof part.content === 'string'
+                ? part.content
+                : Array.isArray(part.content)
+                  ? part.content.map((c: any) => c.text || '').join('')
+                  : '';
+              if (trText.includes('<task-notification>')) {
+                content = trText;
+                break;
+              }
+            }
+          }
+        }
       } else if (typeof message.message.content === 'string') {
         content = decodeHtmlEntities(message.message.content);
       } else {
