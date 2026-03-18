@@ -65,7 +65,16 @@ function getFallbackTasksDir() {
     const drive = process.cwd()[0];
     return path.join(`${drive}:\\tmp`, 'claude', 'tasks');
   }
-  return '/tmp/claude/tasks';
+  // Prefer the UID-suffixed directory that the Claude CLI uses on Linux
+  try {
+    const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+    if (uid !== null) {
+      const uidDir = path.join(os.tmpdir(), `claude-${uid}`, 'tasks');
+      if (fs.existsSync(uidDir)) return uidDir;
+      return uidDir; // Return it as fallback even if it doesn't exist yet
+    }
+  } catch (_) {}
+  return path.join(os.tmpdir(), 'claude', 'tasks');
 }
 
 /**
@@ -86,9 +95,31 @@ function encodeProjectDir(cwd) {
  * @param {string} [cwd] - Working directory to match the correct project subdir
  */
 function findClaudeTasksDir(cwd) {
-  const baseDirs = [
-    path.join(os.tmpdir(), 'claude'),
-  ];
+  const baseDirs = [];
+
+  // On Linux/macOS, Claude CLI may use /tmp/claude-<uid>/ instead of /tmp/claude/.
+  // Add the UID-suffixed variant first (higher priority).
+  if (process.platform !== 'win32') {
+    try {
+      const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+      if (uid !== null) {
+        baseDirs.push(path.join(os.tmpdir(), `claude-${uid}`));
+      }
+    } catch (_) {}
+    // Also scan for any /tmp/claude-<digits> dirs in case the UID differs
+    try {
+      const tmpDir = os.tmpdir();
+      for (const entry of fs.readdirSync(tmpDir, { withFileTypes: true })) {
+        if (entry.isDirectory() && /^claude-\d+$/.test(entry.name)) {
+          const p = path.join(tmpDir, entry.name);
+          if (!baseDirs.includes(p)) baseDirs.push(p);
+        }
+      }
+    } catch (_) {}
+  }
+
+  baseDirs.push(path.join(os.tmpdir(), 'claude'));
+
   if (process.platform === 'win32' && /^[A-Z]:/i.test(process.cwd())) {
     const drive = process.cwd().slice(0, 2);
     baseDirs.push(path.join(drive, '/tmp/claude'));
@@ -104,20 +135,43 @@ function findClaudeTasksDir(cwd) {
   for (const baseDir of baseDirs) {
     if (!fs.existsSync(baseDir)) continue;
 
-    // 1. Try exact project match first
+    // 1. Try exact project match first (handles both flat and session-nested layouts):
+    //    <baseDir>/<project>/tasks/           (SDK < 0.2.72)
+    //    <baseDir>/<project>/<session>/tasks/ (SDK 0.2.72+)
     if (projectEncoded) {
-      const exactDir = path.join(baseDir, projectEncoded, 'tasks');
+      const projectDir = path.join(baseDir, projectEncoded);
+      const exactDir = path.join(projectDir, 'tasks');
       if (fs.existsSync(exactDir)) return exactDir;
+      // Session-nested: look one level deeper inside the project dir
+      if (fs.existsSync(projectDir)) {
+        try {
+          for (const entry of fs.readdirSync(projectDir, { withFileTypes: true })) {
+            if (entry.isDirectory()) {
+              const nested = path.join(projectDir, entry.name, 'tasks');
+              if (fs.existsSync(nested)) return nested;
+            }
+          }
+        } catch (_) {}
+      }
     }
 
-    // 2. Fall back: scan for any project subdir with tasks/
+    // 2. Fall back: scan for any project subdir with tasks/ (or <project>/<session>/tasks/)
     try {
       const entries = fs.readdirSync(baseDir, { withFileTypes: true });
       for (const entry of entries) {
-        if (entry.isDirectory() && entry.name !== 'tasks') {
-          const projectTasksDir = path.join(baseDir, entry.name, 'tasks');
-          if (fs.existsSync(projectTasksDir)) return projectTasksDir;
-        }
+        if (!entry.isDirectory() || entry.name === 'tasks') continue;
+        const projectTasksDir = path.join(baseDir, entry.name, 'tasks');
+        if (fs.existsSync(projectTasksDir)) return projectTasksDir;
+        // Session-nested fallback
+        try {
+          const projectDir = path.join(baseDir, entry.name);
+          for (const sub of fs.readdirSync(projectDir, { withFileTypes: true })) {
+            if (sub.isDirectory()) {
+              const nested = path.join(projectDir, sub.name, 'tasks');
+              if (fs.existsSync(nested)) return nested;
+            }
+          }
+        } catch (_) {}
       }
     } catch (_) { /* permission denied etc. */ }
 
@@ -314,7 +368,7 @@ function monitorSubagentCompletion(agentId, toolUseId, ws) {
         }
       }
 
-      // 3. Read transcript for progress updates
+      // 3. Read transcript for progress updates (and completion when fd is unavailable)
       const transcriptPath = findTranscriptPath(agentId);
       if (!transcriptPath) return;
 
@@ -355,6 +409,87 @@ function monitorSubagentCompletion(agentId, toolUseId, ws) {
           taskId: toolUseId,
           messages: progressMessages
         });
+      }
+
+      // Fallback completion detection via transcript when output file wasn't found (fd===null).
+      // The transcript's last assistant message carries stop_reason="end_turn" when done.
+      // This handles Linux /tmp/claude-<uid>/ layout mismatches and other path failures.
+      if (fd === null) {
+        let resultText = '';
+        let isComplete = false;
+        for (let i = lines.length - 1; i >= 0; i--) {
+          try {
+            const entry = JSON.parse(lines[i]);
+            if (entry.type === 'assistant' && entry.message?.stop_reason === 'end_turn') {
+              const textParts = (entry.message.content || [])
+                .filter(c => c.type === 'text')
+                .map(c => c.text);
+              resultText = textParts.join('\n') || '';
+              isComplete = true;
+              break;
+            }
+          } catch (_) {}
+        }
+
+        if (isComplete) {
+          console.log(`[SUBAGENT] ${agentId} completed via transcript fallback, result length: ${resultText.length}`);
+          clearInterval(interval);
+          subagentMonitors.delete(agentId);
+          transcriptPathCache.delete(agentId);
+
+          backgroundTaskOutputs.set(toolUseId, {
+            type: 'inline',
+            content: resultText,
+            toolLog: '',
+            agentId
+          });
+
+          restoreTaskOutputFiles().catch(e => {
+            console.warn(`[SUBAGENT] restoreTaskOutputFiles failed: ${e.message}`);
+          });
+
+          const task = backgroundTasks.get(toolUseId);
+          if (task) {
+            task.status = 'completed';
+            task.endTime = Date.now();
+            evictOldestCompletedTasks();
+          }
+
+          const taskSessionId = task?.sessionId || null;
+          if (taskSessionId) {
+            emitTaskEvent(taskSessionId, {
+              type: 'subagent-completed',
+              agentId,
+              taskId: toolUseId,
+              output: resultText,
+              toolLog: ''
+            });
+            emitTaskEvent(taskSessionId, {
+              type: 'background-task-completed',
+              taskId: toolUseId
+            });
+          }
+
+          if (task?.queryOptions && task?.writer) {
+            task.writer.send({
+              type: 'session-status',
+              sessionId: task.sessionId,
+              isProcessing: true
+            });
+            const MAX_INJECT = 8000;
+            let injectContent = resultText;
+            if (injectContent.length > MAX_INJECT) {
+              injectContent = `... (${injectContent.length - MAX_INJECT} characters truncated) ...\n` + injectContent.slice(-MAX_INJECT);
+            }
+            const followupPrompt = `<background-task-completed task-id="${toolUseId}" type="subagent" agent-id="${agentId}">\n${injectContent}\n</background-task-completed>`;
+            console.log(`[SUBAGENT] Auto-triggering follow-up query for completed subagent ${agentId} (transcript fallback)`);
+            const followupOptions = { ...task.queryOptions, sessionId: task.sessionId, _isFollowup: true };
+            queryClaudeSDK(followupPrompt, followupOptions, task.writer).catch(e => {
+              console.error(`[SUBAGENT] Follow-up query (transcript fallback) failed:`, e.message);
+            });
+          }
+          return;
+        }
       }
     } catch (e) {
       console.error(`[SUBAGENT] Error monitoring ${agentId}:`, e.message);
